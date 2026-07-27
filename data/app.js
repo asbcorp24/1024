@@ -3,6 +3,11 @@ let busy = false;
 let lastResultLoaded = "";
 let eventSource;
 
+const referenceFieldIds = [
+  "referenceName", "cableType", "revision", "deviceId", "operatorName",
+  "mappingCrc32", "approvalStatus", "referenceComment"
+];
+
 function toast(message) {
   const el = $("toast");
   el.textContent = message;
@@ -29,14 +34,14 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function browserTimeQuery() {
+function browserTimeParams() {
   const now = new Date();
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Browser/Local";
   return new URLSearchParams({
     epochMs: String(now.getTime()),
     offsetMinutes: String(-now.getTimezoneOffset()),
     timeZone
-  }).toString();
+  });
 }
 
 function setBusy(value) {
@@ -44,7 +49,7 @@ function setBusy(value) {
   $("captureButton").disabled = value;
   $("testButton").disabled = value || !$("referenceSelect").value;
   $("referenceSelect").disabled = value;
-  $("referenceName").disabled = value;
+  for (const id of referenceFieldIds) $(id).disabled = value;
 }
 
 function formatSeconds(ms) {
@@ -54,8 +59,23 @@ function formatSeconds(ms) {
 function formatStoredDate(value) {
   if (!value) return "не указана";
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  if (Number.isNaN(date.getTime())) return String(value);
   return date.toLocaleString("ru-RU");
+}
+
+function formatCrc32(value) {
+  if (value === undefined || value === null) return "не указан";
+  return Number(value).toString(16).toUpperCase().padStart(8, "0");
+}
+
+function approvalStatusLabel(status) {
+  return ({
+    draft: "Черновик",
+    pending: "На утверждении",
+    approved: "Утверждён",
+    rejected: "Отклонён",
+    archived: "Архивный"
+  })[status] || status || "не указан";
 }
 
 function updateStatus(status) {
@@ -108,7 +128,7 @@ async function loadDevice() {
   try {
     const device = await api("/api/device");
     const badge = $("deviceBadge");
-    badge.textContent = `${device.hardware} · ${device.ip} · ${device.link ? 'LINK' : 'NO LINK'} · ASYNC`;
+    badge.textContent = `${device.deviceModel || device.hardware} · ${device.ip} · ${device.link ? 'LINK' : 'NO LINK'} · FW ${device.firmwareVersion || '?'}`;
     badge.className = `badge ${device.link ? 'ok' : 'error'}`;
   } catch (error) {
     $("deviceBadge").textContent = "Нет связи";
@@ -131,13 +151,22 @@ function renderFiles(element, files, type) {
 
   for (const item of files) {
     const row = document.createElement("div");
-    row.className = "file-item";
+    row.className = `file-item${item.valid === false ? " invalid-file" : ""}`;
 
     const info = document.createElement("div");
     const name = document.createElement("strong");
-    name.textContent = item.file;
+    name.textContent = item.name || item.file;
     const details = document.createElement("small");
-    details.textContent = `${fileSize(item.size)}${item.kind ? ` · ${item.kind}` : ""}`;
+
+    if (type === "reference") {
+      details.innerHTML = item.valid
+        ? `${escapeHtml(item.cableType)} · рев. ${escapeHtml(item.revision)} · ${escapeHtml(approvalStatusLabel(item.approvalStatus))}<br>` +
+          `${escapeHtml(item.deviceId)} · ${escapeHtml(item.operator)} · ${escapeHtml(formatStoredDate(item.createdAtLocal))}<br>` +
+          `CRC таблицы ${escapeHtml(formatCrc32(item.mappingCrc32))} · CRC матрицы ${escapeHtml(formatCrc32(item.matrixCrc32))} · ${escapeHtml(fileSize(item.size))}`
+        : `Несовместимый или повреждённый эталон · ${escapeHtml(fileSize(item.size))}`;
+    } else {
+      details.textContent = `${fileSize(item.size)}${item.kind ? ` · ${item.kind}` : ""}`;
+    }
     info.append(name, document.createElement("br"), details);
 
     const actions = document.createElement("div");
@@ -167,13 +196,13 @@ async function loadFiles() {
     const select = $("referenceSelect");
     const selected = select.value;
     select.innerHTML = "";
-    for (const item of references) {
+    for (const item of references.filter((reference) => reference.valid)) {
       const option = document.createElement("option");
       option.value = item.file;
-      option.textContent = item.file;
+      option.textContent = `${item.name} · ${item.cableType} · рев. ${item.revision} · ${approvalStatusLabel(item.approvalStatus)}`;
       select.append(option);
     }
-    if (references.some((item) => item.file === selected)) select.value = selected;
+    if (references.some((item) => item.valid && item.file === selected)) select.value = selected;
     $("testButton").disabled = busy || !select.value;
 
     renderFiles($("referenceFiles"), references, "reference");
@@ -198,14 +227,16 @@ async function loadResult(fileName) {
     lastResultLoaded = fileName;
     const summary = result.summary || {};
     const storedTime = result.time || {};
+    const reference = result.referenceMetadata || {};
     $("resultSummary").className = result.passed ? "result-ok" : "result-error";
     $("resultSummary").innerHTML = `
       <strong>${result.passed ? 'КАБЕЛЬ ИСПРАВЕН' : 'ОБНАРУЖЕНЫ ОТЛИЧИЯ'}</strong><br>
-      Дата начала: ${escapeHtml(formatStoredDate(storedTime.startedAtLocal))}<br>
-      Источник времени: ${escapeHtml(storedTime.source || 'не указан')}; часовой пояс: ${escapeHtml(storedTime.timeZone || 'не указан')}<br>
-      Эталон: ${escapeHtml(result.reference || 'не указан')}<br>
+      Испытание: ${escapeHtml(formatStoredDate(storedTime.startedAtLocal))} · ${escapeHtml(storedTime.timeZone || 'часовой пояс не указан')}<br>
+      Эталон: ${escapeHtml(reference.name || result.reference || 'не указан')} · ${escapeHtml(reference.cableType || '')} · рев. ${escapeHtml(reference.revision || '')}<br>
+      Статус эталона: ${escapeHtml(approvalStatusLabel(reference.approvalStatus))}; прибор: ${escapeHtml(reference.deviceId || 'не указан')}; оператор эталона: ${escapeHtml(reference.operator || 'не указан')}<br>
+      CRC таблицы: ${escapeHtml(formatCrc32(reference.mappingCrc32))}; CRC эталонной матрицы: ${escapeHtml(formatCrc32(reference.matrixCrc32))}<br>
       Обрывы: ${summary.missingLinks || 0}; паразитные связи: ${summary.extraLinks || 0};
-      асимметрии: ${summary.asymmetricLinks || 0}; время: ${formatSeconds(result.elapsedMs || 0)}.
+      асимметрии: ${summary.asymmetricLinks || 0}; длительность: ${formatSeconds(result.elapsedMs || 0)}.
     `;
     $("errorTables").hidden = false;
     renderPairs($("missingTable"), result.missing, result.missingTruncated);
@@ -263,23 +294,53 @@ function uploadFile(kind, input, bar, text) {
   xhr.send(form);
 }
 
+function referenceMetadataParams() {
+  const required = [
+    ["referenceName", "Введите название эталона."],
+    ["cableType", "Введите тип кабельной сборки."],
+    ["revision", "Введите ревизию."],
+    ["deviceId", "Укажите прибор."],
+    ["operatorName", "Укажите оператора."]
+  ];
+  for (const [id, message] of required) {
+    if (!$(id).value.trim()) throw new Error(message);
+  }
+
+  const mappingCrc = $("mappingCrc32").value.trim();
+  if (mappingCrc && !/^(?:0x)?[0-9a-f]{1,8}$/i.test(mappingCrc)) {
+    throw new Error("CRC32 таблицы должен содержать до 8 hex-символов.");
+  }
+
+  const params = browserTimeParams();
+  params.set("name", $("referenceName").value.trim());
+  params.set("cableType", $("cableType").value.trim());
+  params.set("revision", $("revision").value.trim());
+  params.set("deviceId", $("deviceId").value.trim());
+  params.set("operator", $("operatorName").value.trim());
+  params.set("mappingCrc32", mappingCrc);
+  params.set("approvalStatus", $("approvalStatus").value);
+  params.set("comment", $("referenceComment").value.trim());
+  return params;
+}
+
 $("captureButton").addEventListener("click", async () => {
-  const name = $("referenceName").value.trim();
-  if (!name) return toast("Введите название эталона.");
   try {
-    const time = browserTimeQuery();
-    await api(`/api/reference/capture?name=${encodeURIComponent(name)}&${time}`, { method: "POST" });
+    const params = referenceMetadataParams();
+    localStorage.setItem("cableTesterDeviceId", $("deviceId").value.trim());
+    localStorage.setItem("cableTesterOperator", $("operatorName").value.trim());
+    await api(`/api/reference/capture?${params}`, { method: "POST" });
     setBusy(true);
-    toast("Эталонный замер запущен. Время получено из браузера.");
+    toast("Эталон v2 запущен. Дата и время получены из браузера.");
   } catch (error) { toast(error.message); }
 });
 
 $("testButton").addEventListener("click", async () => {
   const reference = $("referenceSelect").value;
-  if (!reference) return toast("Выберите эталон.");
+  if (!reference) return toast("Выберите совместимый эталон v2.");
   try {
-    const time = browserTimeQuery();
-    await api(`/api/test/start?reference=${encodeURIComponent(reference)}&${time}`, { method: "POST" });
+    const params = browserTimeParams();
+    params.set("reference", reference);
+    await api(`/api/test/start?${params}`, { method: "POST" });
     setBusy(true);
     toast("Проверка кабеля запущена. Время получено из браузера.");
   } catch (error) { toast(error.message); }
@@ -306,6 +367,8 @@ $("refreshResultsButton").addEventListener("click", async () => {
   if (reports.length) loadResult(reports[reports.length - 1].file);
 });
 
+$("deviceId").value = localStorage.getItem("cableTesterDeviceId") || "";
+$("operatorName").value = localStorage.getItem("cableTesterOperator") || "";
 loadInitialStatus();
 connectEvents();
 loadDevice();
