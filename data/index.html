@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Контроль кабельных сборок 1024</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Контроль кабельных сборок</h1>
+      <p>ESP32-S3 · 64 MCP23017 · 1024 линии</p>
+    </div>
+    <div id="deviceBadge" class="badge neutral">Подключение…</div>
+  </header>
+
+  <main class="layout">
+    <section class="card status-card">
+      <div class="card-head">
+        <h2>Состояние испытания</h2>
+        <span id="stateBadge" class="badge neutral">Ожидание</span>
+      </div>
+      <div class="progress"><div id="progressBar"></div></div>
+      <div class="progress-meta">
+        <span id="progressText">0 / 1024</span>
+        <span id="elapsedText">0,0 с</span>
+      </div>
+      <p id="statusMessage" class="message">Загрузка состояния…</p>
+
+      <div class="stats-grid">
+        <div><b id="expectedLinks">0</b><span>связей в эталоне</span></div>
+        <div><b id="measuredLinks">0</b><span>связей измерено</span></div>
+        <div class="danger"><b id="missingLinks">0</b><span>обрывов</span></div>
+        <div class="danger"><b id="extraLinks">0</b><span>лишних связей</span></div>
+        <div class="warning"><b id="asymmetricLinks">0</b><span>асимметрий</span></div>
+        <div class="warning"><b id="stuckLowPins">0</b><span>постоянный LOW</span></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Создать эталон</h2>
+      <p>Подключите проверенный кабель. Будет сохранена бинарная матрица 1024×1024.</p>
+      <label>
+        Название эталона
+        <input id="referenceName" type="text" maxlength="60" placeholder="Например: cable-a-rev-01">
+      </label>
+      <button id="captureButton" class="primary">Запустить эталонный замер</button>
+    </section>
+
+    <section class="card">
+      <h2>Проверить кабель</h2>
+      <p>Выберите сохранённый эталон и запустите полное сравнение.</p>
+      <label>
+        Эталон
+        <select id="referenceSelect"></select>
+      </label>
+      <button id="testButton" class="primary">Запустить проверку</button>
+    </section>
+
+    <section class="card wide">
+      <div class="card-head">
+        <h2>Последний результат</h2>
+        <button id="refreshResultsButton" class="secondary">Обновить</button>
+      </div>
+      <div id="resultSummary" class="empty">Результатов пока нет.</div>
+      <div id="errorTables" hidden>
+        <h3>Обрывы</h3>
+        <div id="missingTable"></div>
+        <h3>Паразитные связи</h3>
+        <div id="extraTable"></div>
+        <h3>Асимметричные измерения</h3>
+        <div id="asymmetricTable"></div>
+      </div>
+    </section>
+
+    <section class="card wide">
+      <div class="card-head">
+        <h2>Файлы</h2>
+        <button id="refreshFilesButton" class="secondary">Обновить</button>
+      </div>
+      <div class="files-columns">
+        <div>
+          <h3>Эталоны</h3>
+          <div id="referenceFiles" class="file-list"></div>
+        </div>
+        <div>
+          <h3>Результаты</h3>
+          <div id="resultFiles" class="file-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
