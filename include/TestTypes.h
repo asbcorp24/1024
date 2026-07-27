@@ -13,6 +13,7 @@ enum class TestState : uint8_t {
     Idle,
     Preparing,
     Scanning,
+    Analyzing,
     Saving,
     Completed,
     Failed
@@ -67,6 +68,7 @@ inline const char* testStateName(TestState state) {
     switch (state) {
         case TestState::Preparing: return "preparing";
         case TestState::Scanning: return "scanning";
+        case TestState::Analyzing: return "analyzing";
         case TestState::Saving: return "saving";
         case TestState::Completed: return "completed";
         case TestState::Failed: return "failed";
