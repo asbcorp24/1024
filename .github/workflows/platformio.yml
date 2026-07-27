@@ -16,6 +16,21 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
       - name: Build firmware
-        run: pio run
+        shell: bash
+        run: |
+          set -o pipefail
+          pio run 2>&1 | tee platformio-build.log
       - name: Build LittleFS image
-        run: pio run -t buildfs
+        shell: bash
+        run: |
+          set -o pipefail
+          pio run -t buildfs 2>&1 | tee platformio-buildfs.log
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platformio-logs
+          path: |
+            platformio-build.log
+            platformio-buildfs.log
+          if-no-files-found: ignore
