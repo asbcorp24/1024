@@ -1,313 +1,380 @@
 #include "WebApp.h"
 
 #include <ArduinoJson.h>
+#include <FFat.h>
+#include <LittleFS.h>
+#include <Network.h>
 
 #include "AppConfig.h"
 
+WebApp* WebApp::instance_ = nullptr;
+
 WebApp::WebApp(StorageManager& storage, TestEngine& engine)
-    : storage_(storage), engine_(engine), server_(AppConfig::HTTP_PORT) {}
+    : storage_(storage), engine_(engine), server_(AppConfig::HTTP_PORT), events_("/api/events") {}
 
 bool WebApp::begin(String& error) {
-    resetW5500();
+    instance_ = this;
+    Network.onEvent(networkEventThunk);
 
     SPI.begin(AppConfig::W5500_SCK_PIN,
               AppConfig::W5500_MISO_PIN,
               AppConfig::W5500_MOSI_PIN,
               AppConfig::W5500_CS_PIN);
-    Ethernet.init(AppConfig::W5500_CS_PIN);
 
-    uint8_t mac[6];
-    memcpy(mac, AppConfig::MAC_ADDRESS, sizeof(mac));
-
-    if (AppConfig::USE_DHCP) {
-        if (Ethernet.begin(mac, 8000, 3000) == 0) {
-            Ethernet.begin(mac,
-                           AppConfig::STATIC_IP,
-                           AppConfig::STATIC_DNS,
-                           AppConfig::STATIC_GATEWAY,
-                           AppConfig::STATIC_SUBNET);
-        }
-    } else {
-        Ethernet.begin(mac,
-                       AppConfig::STATIC_IP,
-                       AppConfig::STATIC_DNS,
-                       AppConfig::STATIC_GATEWAY,
-                       AppConfig::STATIC_SUBNET);
-    }
-
-    delay(500);
-    if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-        error = "W5500 не обнаружен";
+    if (!ETH.begin(ETH_PHY_W5500,
+                   AppConfig::W5500_PHY_ADDRESS,
+                   AppConfig::W5500_CS_PIN,
+                   AppConfig::W5500_INT_PIN,
+                   AppConfig::W5500_RESET_PIN,
+                   SPI)) {
+        error = "Не удалось запустить W5500 через системный драйвер ETH";
         return false;
     }
 
+    ETH.setHostname(AppConfig::HOSTNAME);
+    if (!AppConfig::USE_DHCP) {
+        if (!ETH.config(AppConfig::STATIC_IP,
+                        AppConfig::STATIC_GATEWAY,
+                        AppConfig::STATIC_SUBNET,
+                        AppConfig::STATIC_DNS)) {
+            error = "Не удалось применить статические параметры Ethernet";
+            return false;
+        }
+    }
+
+    configureRoutes();
+    server_.addHandler(&events_);
+    server_.serveStatic("/", LittleFS, "/")
+        .setDefaultFile("index.html")
+        .setCacheControl("no-store");
+
+    server_.onNotFound([](AsyncWebServerRequest* request) {
+        request->send(404, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"Маршрут не найден\"}");
+    });
+
     server_.begin();
+
+    if (xTaskCreatePinnedToCore(publisherTaskThunk,
+                                "web-events",
+                                6144,
+                                this,
+                                1,
+                                &publisherTaskHandle_,
+                                1) != pdPASS) {
+        error = "HTTP-сервер запущен, но не удалось создать задачу SSE";
+        return false;
+    }
+
     return true;
 }
 
-void WebApp::resetW5500() {
-    if (AppConfig::W5500_RESET_PIN < 0) return;
-    pinMode(AppConfig::W5500_RESET_PIN, OUTPUT);
-    digitalWrite(AppConfig::W5500_RESET_PIN, LOW);
-    delay(5);
-    digitalWrite(AppConfig::W5500_RESET_PIN, HIGH);
-    delay(100);
+void WebApp::networkEventThunk(arduino_event_id_t event, arduino_event_info_t info) {
+    if (instance_ != nullptr) instance_->onNetworkEvent(event, info);
 }
 
-void WebApp::loop() {
-    EthernetClient client = server_.available();
-    if (client) {
-        handleClient(client);
-    }
-
-    if (millis() - lastMaintainMs_ >= 1000) {
-        lastMaintainMs_ = millis();
-        Ethernet.maintain();
+void WebApp::onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
+    (void)info;
+    switch (event) {
+        case ARDUINO_EVENT_ETH_START:
+            ethStarted_ = true;
+            Serial.println("ETH: W5500 started");
+            break;
+        case ARDUINO_EVENT_ETH_CONNECTED:
+            ethLinkUp_ = true;
+            Serial.println("ETH: link connected");
+            break;
+        case ARDUINO_EVENT_ETH_GOT_IP:
+            ethHasIp_ = true;
+            ethLinkUp_ = true;
+            Serial.println("ETH: IP " + ipAddress());
+            break;
+        case ARDUINO_EVENT_ETH_LOST_IP:
+            ethHasIp_ = false;
+            Serial.println("ETH: IP lost");
+            break;
+        case ARDUINO_EVENT_ETH_DISCONNECTED:
+            ethLinkUp_ = false;
+            ethHasIp_ = false;
+            Serial.println("ETH: link disconnected");
+            break;
+        case ARDUINO_EVENT_ETH_STOP:
+            ethStarted_ = false;
+            ethLinkUp_ = false;
+            ethHasIp_ = false;
+            Serial.println("ETH: stopped");
+            break;
+        default:
+            break;
     }
 }
 
 String WebApp::ipAddress() const {
-    const IPAddress ip = Ethernet.localIP();
-    return String(ip[0]) + "." + String(ip[1]) + "." + String(ip[2]) + "." + String(ip[3]);
+    return ETH.localIP().toString();
 }
 
-void WebApp::handleClient(EthernetClient& client) {
-    client.setTimeout(1000);
-    const String requestLine = client.readStringUntil('\n');
-    if (requestLine.length() > 2048) {
-        sendText(client, 414, "Request URI too long");
-        client.stop();
-        return;
-    }
-
-    int firstSpace = requestLine.indexOf(' ');
-    int secondSpace = requestLine.indexOf(' ', firstSpace + 1);
-    if (firstSpace <= 0 || secondSpace <= firstSpace) {
-        sendText(client, 400, "Bad request");
-        client.stop();
-        return;
-    }
-
-    const String method = requestLine.substring(0, firstSpace);
-    const String target = requestLine.substring(firstSpace + 1, secondSpace);
-
-    while (client.connected()) {
-        String line = client.readStringUntil('\n');
-        line.trim();
-        if (line.length() == 0) break;
-    }
-
-    route(client, method, target);
-    delay(1);
-    client.stop();
+bool WebApp::linkUp() const {
+    return ethLinkUp_ && ETH.linkUp();
 }
 
-void WebApp::route(EthernetClient& client, const String& method, const String& target) {
-    const String path = pathOnly(target);
+void WebApp::publisherTaskThunk(void* parameter) {
+    static_cast<WebApp*>(parameter)->publisherTask();
+}
 
-    if (method == "GET" && path == "/api/status") {
-        sendJson(client, 200, engine_.statusJson());
+void WebApp::publisherTask() {
+    for (;;) {
+        publishStatus();
+        vTaskDelay(pdMS_TO_TICKS(350));
+    }
+}
+
+void WebApp::publishStatus() {
+    if (events_.count() == 0) return;
+    const String json = engine_.statusJson();
+    events_.send(json.c_str(), "status", millis(), 1000);
+}
+
+void WebApp::configureRoutes() {
+    events_.onConnect([this](AsyncEventSourceClient* client) {
+        const String json = engine_.statusJson();
+        client->send(json.c_str(), "status", millis(), 1000);
+    });
+
+    server_.on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        sendJson(request, 200, engine_.statusJson());
+    });
+
+    server_.on("/api/device", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        sendDevice(request);
+    });
+
+    server_.on("/api/references", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        sendJson(request, 200, storage_.listReferencesJson());
+    });
+
+    server_.on("/api/calculations", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        sendJson(request, 200, storage_.listCalculationsJson());
+    });
+
+    server_.on("/api/results", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        sendJson(request, 200, storage_.listResultsJson());
+    });
+
+    server_.on("/api/reference/capture", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        String error;
+        if (!engine_.startReferenceCapture(parameter(request, "name"), error)) {
+            sendError(request, 409, error);
+            return;
+        }
+        sendJson(request, 202, "{\"ok\":true,\"message\":\"Эталонный замер запущен\"}");
+    });
+
+    server_.on("/api/test/start", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        String error;
+        if (!engine_.startComparison(parameter(request, "reference"), error)) {
+            sendError(request, 409, error);
+            return;
+        }
+        sendJson(request, 202, "{\"ok\":true,\"message\":\"Проверка запущена\"}");
+    });
+
+    server_.on("/api/result", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        String json;
+        String error;
+        if (!storage_.readResult(parameter(request, "file"), json, error)) {
+            sendError(request, 404, error);
+            return;
+        }
+        sendJson(request, 200, json);
+    });
+
+    server_.on("/api/download", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        sendDownload(request);
+    });
+
+    registerUploadRoute("/api/upload/reference", UploadKind::Reference);
+    registerUploadRoute("/api/upload/calculation", UploadKind::Calculation);
+
+    server_.on("/api/events", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
+        request->send(204);
+    });
+
+    server_.on("/api/upload/reference", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
+        request->send(204);
+    });
+
+    server_.on("/api/upload/calculation", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
+        request->send(204);
+    });
+}
+
+void WebApp::registerUploadRoute(const char* uri, UploadKind kind) {
+    server_.on(uri,
+               HTTP_POST,
+               [this](AsyncWebServerRequest* request) {
+                   finishUploadRequest(request);
+               },
+               [this, kind](AsyncWebServerRequest* request,
+                            const String& filename,
+                            size_t index,
+                            uint8_t* data,
+                            size_t len,
+                            bool final) {
+                   handleUploadChunk(request, kind, filename, index, data, len, final);
+               });
+}
+
+void WebApp::handleUploadChunk(AsyncWebServerRequest* request,
+                               UploadKind kind,
+                               const String& filename,
+                               size_t index,
+                               uint8_t* data,
+                               size_t len,
+                               bool final) {
+    auto* context = static_cast<UploadContext*>(request->_tempObject);
+
+    if (index == 0) {
+        context = new (std::nothrow) UploadContext();
+        request->_tempObject = context;
+        if (context == nullptr) return;
+
+        context->kind = kind;
+        context->originalName = filename;
+        if (!storage_.prepareUpload(uploadKindName(kind),
+                                    filename,
+                                    context->tempPath,
+                                    context->finalPath,
+                                    context->error)) {
+            context->finished = final;
+            return;
+        }
+
+        request->_tempFile = FFat.open(context->tempPath, FILE_WRITE);
+        if (!request->_tempFile) {
+            context->error = "Не удалось открыть временный файл загрузки";
+            context->finished = final;
+            return;
+        }
+    }
+
+    if (context == nullptr) return;
+
+    if (context->error.isEmpty() && len > 0) {
+        const size_t written = request->_tempFile.write(data, len);
+        context->received += written;
+        if (written != len) {
+            context->error = "Загруженный файл записан не полностью";
+        }
+    }
+
+    if (!final) return;
+
+    if (request->_tempFile) {
+        request->_tempFile.flush();
+        request->_tempFile.close();
+    }
+
+    context->finished = true;
+    if (!context->error.isEmpty()) {
+        storage_.discardUpload(context->tempPath);
         return;
     }
 
-    if (method == "GET" && path == "/api/device") {
+    context->success = storage_.finalizeUpload(uploadKindName(kind),
+                                               context->tempPath,
+                                               context->finalPath,
+                                               context->savedFile,
+                                               context->error);
+}
+
+void WebApp::finishUploadRequest(AsyncWebServerRequest* request) {
+    auto* context = static_cast<UploadContext*>(request->_tempObject);
+    if (context == nullptr) {
+        sendError(request, 400, "Файл не передан");
+        return;
+    }
+
+    if (!context->finished) {
+        if (request->_tempFile) request->_tempFile.close();
+        storage_.discardUpload(context->tempPath);
+        sendError(request, 400, "Загрузка файла не завершена");
+    } else if (!context->success) {
+        sendError(request, 422, context->error.isEmpty() ? "Файл не принят" : context->error);
+    } else {
         JsonDocument doc;
-        doc["ip"] = ipAddress();
-        doc["link"] = Ethernet.linkStatus() == LinkON;
-        doc["hardware"] = Ethernet.hardwareStatus() == EthernetW5500 ? "W5500" : "unknown";
-        doc["freeHeap"] = ESP.getFreeHeap();
-        doc["freePsram"] = ESP.getFreePsram();
-        doc["flashSize"] = ESP.getFlashChipSize();
+        doc["ok"] = true;
+        doc["file"] = context->savedFile;
+        doc["bytes"] = context->received;
+        doc["type"] = uploadKindName(context->kind);
         String json;
         serializeJson(doc, json);
-        sendJson(client, 200, json);
-        return;
+        sendJson(request, 201, json);
+        events_.send("{\"changed\":true}", "files", millis());
     }
 
-    if (method == "GET" && path == "/api/references") {
-        sendJson(client, 200, storage_.listReferencesJson());
-        return;
-    }
+    delete context;
+    request->_tempObject = nullptr;
+}
 
-    if (method == "GET" && path == "/api/results") {
-        sendJson(client, 200, storage_.listResultsJson());
-        return;
-    }
+void WebApp::sendDevice(AsyncWebServerRequest* request) {
+    JsonDocument doc;
+    doc["ip"] = ipAddress();
+    doc["hostname"] = AppConfig::HOSTNAME;
+    doc["link"] = linkUp();
+    doc["hasIp"] = ethHasIp_;
+    doc["started"] = ethStarted_;
+    doc["hardware"] = "W5500";
+    doc["mac"] = ETH.macAddress();
+    doc["freeHeap"] = ESP.getFreeHeap();
+    doc["freePsram"] = ESP.getFreePsram();
+    doc["flashSize"] = ESP.getFlashChipSize();
+    doc["asyncWeb"] = true;
 
-    if (method == "POST" && path == "/api/reference/capture") {
-        const String name = queryValue(target, "name");
-        String error;
-        if (!engine_.startReferenceCapture(name, error)) {
-            sendJson(client, 409, "{\"ok\":false,\"error\":\"" + error + "\"}");
-        } else {
-            sendJson(client, 202, "{\"ok\":true}");
-        }
-        return;
-    }
+    String json;
+    serializeJson(doc, json);
+    sendJson(request, 200, json);
+}
 
-    if (method == "POST" && path == "/api/test/start") {
-        const String reference = queryValue(target, "reference");
-        String error;
-        if (!engine_.startComparison(reference, error)) {
-            sendJson(client, 409, "{\"ok\":false,\"error\":\"" + error + "\"}");
-        } else {
-            sendJson(client, 202, "{\"ok\":true}");
-        }
-        return;
-    }
-
-    if (method == "GET" && path == "/api/result") {
-        const String fileName = queryValue(target, "file");
-        String json;
-        String error;
-        if (!storage_.readResult(fileName, json, error)) {
-            sendJson(client, 404, "{\"ok\":false,\"error\":\"" + error + "\"}");
-        } else {
-            sendJson(client, 200, json);
-        }
-        return;
-    }
-
-    if (method == "GET" && path == "/api/download") {
-        const String type = queryValue(target, "type");
-        const String fileName = queryValue(target, "file");
-        if (!StorageManager::safeFileName(fileName)) {
-            sendText(client, 400, "Invalid file name");
-            return;
-        }
-        String relativePath;
-        if (type == "reference") relativePath = String(AppConfig::REFERENCE_DIR) + "/" + fileName;
-        else if (type == "result") relativePath = String(AppConfig::RESULT_DIR) + "/" + fileName;
-        else {
-            sendText(client, 400, "Invalid file type");
-            return;
-        }
-
-        File file;
-        String contentType;
-        if (!storage_.openDataFile(relativePath, file, contentType)) {
-            sendText(client, 404, "File not found");
-            return;
-        }
-        sendFile(client, file, contentType, true, fileName);
-        file.close();
-        return;
-    }
-
-    if (method != "GET") {
-        sendText(client, 405, "Method not allowed");
-        return;
-    }
-
-    File file;
+void WebApp::sendDownload(AsyncWebServerRequest* request) {
+    const String type = parameter(request, "type");
+    const String fileName = parameter(request, "file");
+    String path;
     String contentType;
-    if (!storage_.openStaticFile(path, file, contentType)) {
-        sendText(client, 404, "Not found");
+    String error;
+
+    if (!storage_.resolveDataFile(type, fileName, path, contentType, error)) {
+        sendError(request, 404, error);
         return;
     }
-    sendFile(client, file, contentType);
-    file.close();
+
+    AsyncWebServerResponse* response = request->beginResponse(FFat, path, contentType, true);
+    response->addHeader("Cache-Control", "no-store");
+    response->addHeader("X-Content-Type-Options", "nosniff");
+    request->send(response);
 }
 
-void WebApp::sendHeader(EthernetClient& client,
-                        int statusCode,
-                        const String& contentType,
-                        size_t contentLength,
-                        const String& extraHeaders) {
-    client.print("HTTP/1.1 ");
-    client.print(statusCode);
-    client.print(' ');
-    client.println(statusText(statusCode));
-    client.print("Content-Type: ");
-    client.println(contentType);
-    client.print("Content-Length: ");
-    client.println(contentLength);
-    client.println("Connection: close");
-    client.println("Cache-Control: no-store");
-    client.println("Access-Control-Allow-Origin: *");
-    if (extraHeaders.length()) client.print(extraHeaders);
-    client.println();
+void WebApp::sendJson(AsyncWebServerRequest* request, int statusCode, const String& json) {
+    AsyncWebServerResponse* response = request->beginResponse(statusCode,
+                                                              "application/json; charset=utf-8",
+                                                              json);
+    response->addHeader("Cache-Control", "no-store");
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(response);
 }
 
-void WebApp::sendJson(EthernetClient& client, int statusCode, const String& json) {
-    sendHeader(client, statusCode, "application/json; charset=utf-8", json.length());
-    client.print(json);
+void WebApp::sendError(AsyncWebServerRequest* request, int statusCode, const String& error) {
+    JsonDocument doc;
+    doc["ok"] = false;
+    doc["error"] = error;
+    String json;
+    serializeJson(doc, json);
+    sendJson(request, statusCode, json);
 }
 
-void WebApp::sendText(EthernetClient& client, int statusCode, const String& text) {
-    sendHeader(client, statusCode, "text/plain; charset=utf-8", text.length());
-    client.print(text);
+String WebApp::parameter(AsyncWebServerRequest* request, const char* name) {
+    if (!request->hasParam(name)) return "";
+    return request->getParam(name)->value();
 }
 
-void WebApp::sendFile(EthernetClient& client,
-                      File& file,
-                      const String& contentType,
-                      bool attachment,
-                      const String& fileName) {
-    String extra;
-    if (attachment) {
-        extra = "Content-Disposition: attachment; filename=\"" + fileName + "\"\r\n";
-    }
-    sendHeader(client, 200, contentType, file.size(), extra);
-
-    uint8_t buffer[1024];
-    while (file.available() && client.connected()) {
-        const size_t count = file.read(buffer, sizeof(buffer));
-        if (count == 0) break;
-        client.write(buffer, count);
-    }
-}
-
-String WebApp::pathOnly(const String& target) {
-    const int query = target.indexOf('?');
-    return query < 0 ? target : target.substring(0, query);
-}
-
-String WebApp::queryValue(const String& target, const String& key) {
-    const int queryStart = target.indexOf('?');
-    if (queryStart < 0) return "";
-
-    int cursor = queryStart + 1;
-    while (cursor < static_cast<int>(target.length())) {
-        int amp = target.indexOf('&', cursor);
-        if (amp < 0) amp = target.length();
-        const String pair = target.substring(cursor, amp);
-        const int equals = pair.indexOf('=');
-        const String pairKey = equals < 0 ? pair : pair.substring(0, equals);
-        if (pairKey == key) {
-            return urlDecode(equals < 0 ? "" : pair.substring(equals + 1));
-        }
-        cursor = amp + 1;
-    }
-    return "";
-}
-
-String WebApp::urlDecode(const String& value) {
-    String result;
-    result.reserve(value.length());
-    for (size_t i = 0; i < value.length(); ++i) {
-        if (value[i] == '+') {
-            result += ' ';
-        } else if (value[i] == '%' && i + 2 < value.length()) {
-            char hex[3] = {value[i + 1], value[i + 2], 0};
-            result += static_cast<char>(strtol(hex, nullptr, 16));
-            i += 2;
-        } else {
-            result += value[i];
-        }
-    }
-    return result;
-}
-
-const char* WebApp::statusText(int statusCode) {
-    switch (statusCode) {
-        case 200: return "OK";
-        case 202: return "Accepted";
-        case 400: return "Bad Request";
-        case 404: return "Not Found";
-        case 405: return "Method Not Allowed";
-        case 409: return "Conflict";
-        case 414: return "URI Too Long";
-        default: return "Error";
-    }
+String WebApp::uploadKindName(UploadKind kind) {
+    return kind == UploadKind::Reference ? "reference" : "calculation";
 }
