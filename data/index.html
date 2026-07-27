@@ -38,19 +38,56 @@
       </div>
     </section>
 
-    <section class="card">
-      <h2>Создать эталон</h2>
-      <p>Подключите проверенный кабель. Измерение и сохранение выполняются в фоновой задаче.</p>
-      <label>
-        Название эталона
-        <input id="referenceName" type="text" maxlength="60" placeholder="Например: cable-a-rev-01">
-      </label>
+    <section class="card wide">
+      <h2>Создать эталон v2</h2>
+      <p>Метаданные и матрица сохраняются в одном файле <code>.ref</code>. Дата и часовой пояс берутся из браузера автоматически.</p>
+      <div class="form-grid">
+        <label>
+          Название эталона
+          <input id="referenceName" type="text" maxlength="63" placeholder="Например: КС-17 ревизия 3" required>
+        </label>
+        <label>
+          Тип кабельной сборки
+          <input id="cableType" type="text" maxlength="63" placeholder="Например: КС-17" required>
+        </label>
+        <label>
+          Ревизия
+          <input id="revision" type="text" maxlength="31" placeholder="Например: 03" required>
+        </label>
+        <label>
+          Прибор, на котором создан эталон
+          <input id="deviceId" type="text" maxlength="63" placeholder="Например: КСК-1024 №0001" required>
+        </label>
+        <label>
+          Оператор
+          <input id="operatorName" type="text" maxlength="95" placeholder="ФИО или табельный номер" required>
+        </label>
+        <label>
+          CRC32 таблицы соединений
+          <input id="mappingCrc32" type="text" maxlength="10" placeholder="Например: A4C18B39" pattern="(?:0[xX])?[0-9A-Fa-f]{1,8}">
+          <small>Оставьте пустым, пока таблица соединений не загружена.</small>
+        </label>
+        <label>
+          Статус утверждения
+          <select id="approvalStatus">
+            <option value="draft">Черновик</option>
+            <option value="pending">На утверждении</option>
+            <option value="approved">Утверждён</option>
+            <option value="rejected">Отклонён</option>
+            <option value="archived">Архивный</option>
+          </select>
+        </label>
+        <label class="span-two">
+          Комментарий
+          <textarea id="referenceComment" maxlength="255" rows="3" placeholder="Основание создания, особенности кабеля, номер документа"></textarea>
+        </label>
+      </div>
       <button id="captureButton" class="primary">Запустить эталонный замер</button>
     </section>
 
-    <section class="card">
+    <section class="card wide">
       <h2>Проверить кабель</h2>
-      <p>Выберите сохранённый или загруженный эталон и запустите полное сравнение.</p>
+      <p>Выберите сохранённый или загруженный эталон v2 и запустите полное сравнение.</p>
       <label>
         Эталон
         <select id="referenceSelect"></select>
@@ -68,7 +105,7 @@
       <div class="upload-grid">
         <div class="upload-box">
           <h3>Загрузить эталон</h3>
-          <p>Допускается проверенный файл формата <code>.ref</code>. Перед сохранением проверяются заголовок, размер и CRC32.</p>
+          <p>Принимается только формат <code>.ref v2</code>. Проверяются заголовок, метаданные, размер и CRC32 матрицы.</p>
           <input id="referenceUploadInput" type="file" accept=".ref,application/octet-stream">
           <button id="referenceUploadButton" class="secondary">Загрузить эталон</button>
           <div class="upload-progress"><div id="referenceUploadBar"></div></div>

@@ -5,6 +5,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include "BrowserTime.h"
 #include "McpMatrix.h"
 #include "StorageManager.h"
 #include "TestTypes.h"
@@ -14,8 +15,10 @@ public:
     TestEngine(McpMatrix& matrix, StorageManager& storage);
 
     void begin(bool hardwareReady, const String& hardwareMessage);
-    bool startReferenceCapture(const String& name, String& error);
-    bool startComparison(const String& referenceFile, String& error);
+    bool startReferenceCapture(const ReferenceCaptureMetadata& metadata, String& error);
+    bool startComparison(const String& referenceFile,
+                         const BrowserTimeContext& browserTime,
+                         String& error);
     bool isBusy() const;
 
     EngineSnapshot snapshot();
@@ -32,6 +35,8 @@ private:
     bool hardwareReady_ = false;
     String requestedValue_;
     TestMode requestedMode_ = TestMode::Idle;
+    BrowserTimeContext requestedTime_;
+    ReferenceCaptureMetadata requestedReferenceMetadata_;
 
     static void taskEntry(void* parameter);
     void runTask();
@@ -39,18 +44,21 @@ private:
     bool readRowWithRetry(uint8_t* row, String& error);
     void analyze(const uint8_t* reference, const uint8_t* measured, ScanStatistics& statistics);
     String buildReport(const String& referenceFile,
+                       const ReferenceFileHeader* referenceHeader,
                        const String& matrixFile,
                        const uint8_t* reference,
                        const uint8_t* measured,
                        const uint8_t* baseline,
                        const ScanStatistics& statistics,
-                       uint32_t elapsedMs);
+                       uint32_t elapsedMs,
+                       const BrowserTimeContext& browserTime);
 
     void setState(TestState state, const String& message);
     void setProgress(uint16_t currentSource, uint32_t elapsedMs);
     void setStatistics(const ScanStatistics& statistics);
     void finishTask();
 
+    static bool stateIsBusy(TestState state);
     static bool bitAt(const uint8_t* matrix, uint16_t row, uint16_t column);
     static bool bitAtRow(const uint8_t* row, uint16_t column);
     static void clearBitInRow(uint8_t* row, uint16_t column);

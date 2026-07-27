@@ -1,7 +1,9 @@
 #pragma once
 
 #include <Arduino.h>
+
 #include "AppConfig.h"
+#include "BrowserTime.h"
 
 enum class TestMode : uint8_t {
     Idle,
@@ -19,17 +21,46 @@ enum class TestState : uint8_t {
     Failed
 };
 
+struct ReferenceCaptureMetadata {
+    BrowserTimeContext time;
+    uint32_t mappingCrc32 = 0;
+    char name[64] = {};
+    char cableType[64] = {};
+    char revision[32] = {};
+    char deviceId[64] = {};
+    char operatorName[96] = {};
+    char comment[256] = {};
+    char approvalStatus[24] = {};
+
+    bool valid() const {
+        return time.valid() && name[0] != '\0' && cableType[0] != '\0' &&
+               revision[0] != '\0' && deviceId[0] != '\0' &&
+               operatorName[0] != '\0' && approvalStatus[0] != '\0';
+    }
+};
+
 struct __attribute__((packed)) ReferenceFileHeader {
     uint32_t magic;
     uint16_t version;
+    uint16_t headerBytes;
     uint16_t pinCount;
     uint16_t rowBytes;
-    uint16_t reserved;
     uint32_t matrixBytes;
     uint32_t matrixCrc32;
     uint32_t mappingCrc32;
-    uint64_t createdAtMs;
+    uint64_t createdAtEpochMs;
+    int16_t utcOffsetMinutes;
+    uint16_t reserved;
     char name[64];
+    char cableType[64];
+    char revision[32];
+    char deviceId[64];
+    char deviceModel[32];
+    char firmwareVersion[24];
+    char operatorName[96];
+    char timeZone[64];
+    char comment[256];
+    char approvalStatus[24];
 };
 
 struct ScanStatistics {

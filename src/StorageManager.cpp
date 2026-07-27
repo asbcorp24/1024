@@ -6,6 +6,27 @@
 #include <cstring>
 
 #include "AppConfig.h"
+#include "BrowserTime.h"
+
+namespace {
+
+String uint64ToString(uint64_t value) {
+    char buffer[24];
+    snprintf(buffer, sizeof(buffer), "%llu", static_cast<unsigned long long>(value));
+    return String(buffer);
+}
+
+bool validReferenceHeader(const ReferenceFileHeader& header) {
+    return header.magic == AppConfig::REFERENCE_MAGIC &&
+           header.version == AppConfig::FILE_FORMAT_VERSION &&
+           header.headerBytes == sizeof(ReferenceFileHeader) &&
+           header.pinCount == AppConfig::PIN_COUNT &&
+           header.rowBytes == AppConfig::ROW_BYTES &&
+           header.matrixBytes == AppConfig::MATRIX_BYTES &&
+           header.createdAtEpochMs >= 946684800000ULL;
+}
+
+} // namespace
 
 bool StorageManager::begin(String& error) {
     staticMounted_ = LittleFS.begin(true, AppConfig::STATIC_FS_BASE, 10, "littlefs");
@@ -63,7 +84,7 @@ String StorageManager::listDirectoryJson(const char* directory,
 
     File file = dir.openNextFile();
     while (file) {
-        String fileName = baseFileName(file.name());
+        const String fileName = baseFileName(file.name());
         const bool extensionMatches = fileName.endsWith(extensionA) ||
                                       (extensionB != nullptr && fileName.endsWith(extensionB));
         if (!file.isDirectory() && extensionMatches) {
@@ -83,7 +104,54 @@ String StorageManager::listDirectoryJson(const char* directory,
 }
 
 String StorageManager::listReferencesJson() {
-    return listDirectoryJson(AppConfig::REFERENCE_DIR, ".ref");
+    String json = "[";
+    bool first = true;
+    File dir = FFat.open(AppConfig::REFERENCE_DIR);
+    if (!dir || !dir.isDirectory()) return "[]";
+
+    File file = dir.openNextFile();
+    while (file) {
+        const String fileName = baseFileName(file.name());
+        if (!file.isDirectory() && fileName.endsWith(".ref")) {
+            const size_t fileSize = file.size();
+            ReferenceFileHeader header{};
+            const bool readable = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) == sizeof(header);
+            const bool valid = readable && validReferenceHeader(header) &&
+                               fileSize == static_cast<size_t>(header.headerBytes) + header.matrixBytes;
+
+            if (!first) json += ',';
+            first = false;
+            json += "{\"file\":\"" + jsonEscape(fileName) + "\",";
+            json += "\"size\":" + String(static_cast<uint32_t>(fileSize));
+            json += ",\"kind\":\"reference\"";
+            json += ",\"valid\":";
+            json += valid ? "true" : "false";
+
+            if (valid) {
+                json += ",\"formatVersion\":" + String(header.version);
+                json += ",\"name\":\"" + jsonEscape(header.name) + "\"";
+                json += ",\"cableType\":\"" + jsonEscape(header.cableType) + "\"";
+                json += ",\"revision\":\"" + jsonEscape(header.revision) + "\"";
+                json += ",\"deviceId\":\"" + jsonEscape(header.deviceId) + "\"";
+                json += ",\"deviceModel\":\"" + jsonEscape(header.deviceModel) + "\"";
+                json += ",\"firmwareVersion\":\"" + jsonEscape(header.firmwareVersion) + "\"";
+                json += ",\"operator\":\"" + jsonEscape(header.operatorName) + "\"";
+                json += ",\"approvalStatus\":\"" + jsonEscape(header.approvalStatus) + "\"";
+                json += ",\"comment\":\"" + jsonEscape(header.comment) + "\"";
+                json += ",\"mappingCrc32\":" + String(header.mappingCrc32);
+                json += ",\"matrixCrc32\":" + String(header.matrixCrc32);
+                json += ",\"createdAtEpochMs\":" + uint64ToString(header.createdAtEpochMs);
+                json += ",\"createdAtUtc\":\"" + jsonEscape(BrowserTime::formatUtc(header.createdAtEpochMs)) + "\"";
+                json += ",\"createdAtLocal\":\"" + jsonEscape(BrowserTime::formatLocal(header.createdAtEpochMs, header.utcOffsetMinutes)) + "\"";
+                json += ",\"utcOffsetMinutes\":" + String(header.utcOffsetMinutes);
+                json += ",\"timeZone\":\"" + jsonEscape(header.timeZone) + "\"";
+            }
+            json += '}';
+        }
+        file = dir.openNextFile();
+    }
+    json += ']';
+    return json;
 }
 
 String StorageManager::listResultsJson() {
@@ -94,30 +162,44 @@ String StorageManager::listCalculationsJson() {
     return listDirectoryJson(AppConfig::RESULT_DIR, ".json", ".bin");
 }
 
-bool StorageManager::saveReference(const String& name,
+bool StorageManager::saveReference(const ReferenceCaptureMetadata& metadata,
                                    const uint8_t* matrix,
-                                   uint32_t mappingCrc32,
                                    String& savedFile,
                                    String& error) {
     if (!dataMounted_ || matrix == nullptr) {
         error = "Хранилище данных не готово";
         return false;
     }
+    if (!metadata.valid()) {
+        error = "Не заполнены обязательные метаданные эталона";
+        return false;
+    }
 
-    const String base = sanitizeBaseName(name);
+    const String base = sanitizeBaseName(metadata.name);
     const String finalPath = String(AppConfig::REFERENCE_DIR) + "/" + base + ".ref";
     const String tempPath = finalPath + ".tmp";
 
     ReferenceFileHeader header{};
     header.magic = AppConfig::REFERENCE_MAGIC;
     header.version = AppConfig::FILE_FORMAT_VERSION;
+    header.headerBytes = sizeof(ReferenceFileHeader);
     header.pinCount = AppConfig::PIN_COUNT;
     header.rowBytes = AppConfig::ROW_BYTES;
     header.matrixBytes = AppConfig::MATRIX_BYTES;
     header.matrixCrc32 = crc32(matrix, AppConfig::MATRIX_BYTES);
-    header.mappingCrc32 = mappingCrc32;
-    header.createdAtMs = millis();
-    strlcpy(header.name, name.c_str(), sizeof(header.name));
+    header.mappingCrc32 = metadata.mappingCrc32;
+    header.createdAtEpochMs = metadata.time.startedAtEpochMs;
+    header.utcOffsetMinutes = metadata.time.utcOffsetMinutes;
+    strlcpy(header.name, metadata.name, sizeof(header.name));
+    strlcpy(header.cableType, metadata.cableType, sizeof(header.cableType));
+    strlcpy(header.revision, metadata.revision, sizeof(header.revision));
+    strlcpy(header.deviceId, metadata.deviceId, sizeof(header.deviceId));
+    strlcpy(header.deviceModel, AppConfig::DEVICE_MODEL, sizeof(header.deviceModel));
+    strlcpy(header.firmwareVersion, AppConfig::FIRMWARE_VERSION, sizeof(header.firmwareVersion));
+    strlcpy(header.operatorName, metadata.operatorName, sizeof(header.operatorName));
+    strlcpy(header.timeZone, metadata.time.timeZone, sizeof(header.timeZone));
+    strlcpy(header.comment, metadata.comment, sizeof(header.comment));
+    strlcpy(header.approvalStatus, metadata.approvalStatus, sizeof(header.approvalStatus));
 
     FFat.remove(tempPath);
     File file = FFat.open(tempPath, FILE_WRITE);
@@ -133,7 +215,7 @@ bool StorageManager::saveReference(const String& name,
 
     if (!ok) {
         FFat.remove(tempPath);
-        error = "Ошибка записи матрицы эталона";
+        error = "Ошибка записи файла эталона";
         return false;
     }
 
@@ -170,13 +252,10 @@ bool StorageManager::loadReference(const String& fileName,
         return false;
     }
 
-    if (header.magic != AppConfig::REFERENCE_MAGIC ||
-        header.version != AppConfig::FILE_FORMAT_VERSION ||
-        header.pinCount != AppConfig::PIN_COUNT ||
-        header.rowBytes != AppConfig::ROW_BYTES ||
-        header.matrixBytes != AppConfig::MATRIX_BYTES) {
+    if (!validReferenceHeader(header) ||
+        file.size() != static_cast<size_t>(header.headerBytes) + header.matrixBytes) {
         file.close();
-        error = "Несовместимый формат файла эталона";
+        error = "Несовместимый формат эталона: требуется версия 2";
         return false;
     }
 
@@ -331,13 +410,6 @@ bool StorageManager::validateReferenceFile(const String& path, String& error) {
         return false;
     }
 
-    const size_t expectedSize = sizeof(ReferenceFileHeader) + AppConfig::MATRIX_BYTES;
-    if (file.size() != expectedSize) {
-        file.close();
-        error = "Неверный размер файла эталона";
-        return false;
-    }
-
     ReferenceFileHeader header{};
     if (file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) != sizeof(header)) {
         file.close();
@@ -345,13 +417,16 @@ bool StorageManager::validateReferenceFile(const String& path, String& error) {
         return false;
     }
 
-    if (header.magic != AppConfig::REFERENCE_MAGIC ||
-        header.version != AppConfig::FILE_FORMAT_VERSION ||
-        header.pinCount != AppConfig::PIN_COUNT ||
-        header.rowBytes != AppConfig::ROW_BYTES ||
-        header.matrixBytes != AppConfig::MATRIX_BYTES) {
+    if (!validReferenceHeader(header)) {
         file.close();
-        error = "Загруженный эталон несовместим с устройством";
+        error = "Загруженный эталон несовместим: требуется формат v2";
+        return false;
+    }
+
+    const size_t expectedSize = static_cast<size_t>(header.headerBytes) + header.matrixBytes;
+    if (file.size() != expectedSize) {
+        file.close();
+        error = "Неверный размер файла эталона v2";
         return false;
     }
 
@@ -372,7 +447,7 @@ bool StorageManager::validateReferenceFile(const String& path, String& error) {
     file.close();
 
     if ((~crc) != header.matrixCrc32) {
-        error = "CRC загруженного эталона не совпадает";
+        error = "CRC матрицы загруженного эталона не совпадает";
         return false;
     }
     return true;

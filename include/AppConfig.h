@@ -22,6 +22,8 @@ constexpr uint8_t W5500_INT_PIN = 15;
 constexpr uint8_t W5500_PHY_ADDRESS = 1;
 
 constexpr const char* HOSTNAME = "cable-tester-1024";
+constexpr const char* DEVICE_MODEL = "KSK-1024";
+constexpr const char* FIRMWARE_VERSION = "2.0.0";
 constexpr bool USE_DHCP = true;
 const IPAddress STATIC_IP(192, 168, 1, 204);
 const IPAddress STATIC_DNS(192, 168, 1, 1);
@@ -48,6 +50,6 @@ constexpr const char* RESULT_DIR = "/results";
 constexpr size_t MAX_CALCULATION_JSON_BYTES = 1024U * 1024U;
 
 constexpr uint32_t REFERENCE_MAGIC = 0x31464243UL;
-constexpr uint16_t FILE_FORMAT_VERSION = 1;
+constexpr uint16_t FILE_FORMAT_VERSION = 2;
 
 } // namespace AppConfig
