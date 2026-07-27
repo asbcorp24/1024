@@ -4,13 +4,21 @@
 #include <esp_heap_caps.h>
 #include <cstring>
 
+namespace {
+
+String uint64ToString(uint64_t value) {
+    char buffer[24];
+    snprintf(buffer, sizeof(buffer), "%llu", static_cast<unsigned long long>(value));
+    return String(buffer);
+}
+
+} // namespace
+
 TestEngine::TestEngine(McpMatrix& matrix, StorageManager& storage)
     : matrix_(matrix), storage_(storage) {}
 
 void TestEngine::begin(bool hardwareReady, const String& hardwareMessage) {
-    if (mutex_ == nullptr) {
-        mutex_ = xSemaphoreCreateMutex();
-    }
+    if (mutex_ == nullptr) mutex_ = xSemaphoreCreateMutex();
     hardwareReady_ = hardwareReady;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     snapshot_ = EngineSnapshot{};
@@ -21,30 +29,42 @@ void TestEngine::begin(bool hardwareReady, const String& hardwareMessage) {
     xSemaphoreGive(mutex_);
 }
 
+bool TestEngine::stateIsBusy(TestState state) {
+    return state == TestState::Preparing ||
+           state == TestState::Scanning ||
+           state == TestState::Analyzing ||
+           state == TestState::Saving;
+}
+
 bool TestEngine::isBusy() const {
     if (mutex_ == nullptr) return false;
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    const bool busy = snapshot_.state == TestState::Preparing ||
-                      snapshot_.state == TestState::Scanning ||
-                      snapshot_.state == TestState::Saving;
+    const bool busy = stateIsBusy(snapshot_.state);
     xSemaphoreGive(mutex_);
     return busy;
 }
 
-bool TestEngine::startReferenceCapture(const String& name, String& error) {
+bool TestEngine::startReferenceCapture(const ReferenceCaptureMetadata& metadata, String& error) {
     if (!hardwareReady_) {
         error = "Аппаратная матрица MCP23017 не готова";
         return false;
     }
-    if (isBusy()) {
+    if (!metadata.valid()) {
+        error = "Не заполнены обязательные метаданные эталона";
+        return false;
+    }
+
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (stateIsBusy(snapshot_.state)) {
+        xSemaphoreGive(mutex_);
         error = "Уже выполняется другое измерение";
         return false;
     }
 
     requestedMode_ = TestMode::CaptureReference;
-    requestedValue_ = name.length() ? name : "reference";
-
-    xSemaphoreTake(mutex_, portMAX_DELAY);
+    requestedValue_ = metadata.name;
+    requestedTime_ = metadata.time;
+    requestedReferenceMetadata_ = metadata;
     snapshot_ = EngineSnapshot{};
     snapshot_.mode = requestedMode_;
     snapshot_.state = TestState::Preparing;
@@ -61,13 +81,15 @@ bool TestEngine::startReferenceCapture(const String& name, String& error) {
     return true;
 }
 
-bool TestEngine::startComparison(const String& referenceFile, String& error) {
+bool TestEngine::startComparison(const String& referenceFile,
+                                 const BrowserTimeContext& browserTime,
+                                 String& error) {
     if (!hardwareReady_) {
         error = "Аппаратная матрица MCP23017 не готова";
         return false;
     }
-    if (isBusy()) {
-        error = "Уже выполняется другое измерение";
+    if (!browserTime.valid()) {
+        error = "Не переданы корректные дата и время браузера";
         return false;
     }
     if (!StorageManager::safeFileName(referenceFile) || !referenceFile.endsWith(".ref")) {
@@ -75,10 +97,17 @@ bool TestEngine::startComparison(const String& referenceFile, String& error) {
         return false;
     }
 
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (stateIsBusy(snapshot_.state)) {
+        xSemaphoreGive(mutex_);
+        error = "Уже выполняется другое измерение";
+        return false;
+    }
+
     requestedMode_ = TestMode::Compare;
     requestedValue_ = referenceFile;
-
-    xSemaphoreTake(mutex_, portMAX_DELAY);
+    requestedTime_ = browserTime;
+    requestedReferenceMetadata_ = ReferenceCaptureMetadata{};
     snapshot_ = EngineSnapshot{};
     snapshot_.mode = requestedMode_;
     snapshot_.state = TestState::Preparing;
@@ -100,7 +129,8 @@ void TestEngine::taskEntry(void* parameter) {
 }
 
 uint8_t* TestEngine::allocateMatrix() {
-    auto* matrix = static_cast<uint8_t*>(heap_caps_malloc(AppConfig::MATRIX_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    auto* matrix = static_cast<uint8_t*>(heap_caps_malloc(AppConfig::MATRIX_BYTES,
+                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (matrix == nullptr) {
         matrix = static_cast<uint8_t*>(heap_caps_malloc(AppConfig::MATRIX_BYTES, MALLOC_CAP_8BIT));
     }
@@ -123,10 +153,14 @@ void TestEngine::runTask() {
         return;
     }
 
-    ReferenceFileHeader referenceHeader{};
+    xSemaphoreTake(mutex_, portMAX_DELAY);
     const TestMode mode = requestedMode_;
     const String requestedValue = requestedValue_;
+    const BrowserTimeContext browserTime = requestedTime_;
+    const ReferenceCaptureMetadata captureMetadata = requestedReferenceMetadata_;
+    xSemaphoreGive(mutex_);
 
+    ReferenceFileHeader referenceHeader{};
     if (mode == TestMode::Compare) {
         reference = allocateMatrix();
         if (reference == nullptr) {
@@ -188,18 +222,19 @@ void TestEngine::runTask() {
     statistics.i2cErrors = snapshot_.statistics.i2cErrors;
     xSemaphoreGive(mutex_);
 
+    setState(TestState::Analyzing, "Расчёт отличий и проверка симметрии");
     analyze(reference, measured, statistics);
     setStatistics(statistics);
     setState(TestState::Saving, "Сохранение файлов измерения");
 
     if (mode == TestMode::CaptureReference) {
         String savedReference;
-        if (!storage_.saveReference(requestedValue, measured, 0, savedReference, error)) {
+        if (!storage_.saveReference(captureMetadata, measured, savedReference, error)) {
             setState(TestState::Failed, error);
         } else {
             xSemaphoreTake(mutex_, portMAX_DELAY);
             strlcpy(snapshot_.activeReference, savedReference.c_str(), sizeof(snapshot_.activeReference));
-            strlcpy(snapshot_.message, "Эталон успешно сохранён", sizeof(snapshot_.message));
+            strlcpy(snapshot_.message, "Эталон v2 успешно сохранён", sizeof(snapshot_.message));
             snapshot_.elapsedMs = millis() - startedMs;
             snapshot_.state = TestState::Completed;
             xSemaphoreGive(mutex_);
@@ -217,12 +252,14 @@ void TestEngine::runTask() {
         } else {
             const uint32_t elapsed = millis() - startedMs;
             const String report = buildReport(requestedValue,
+                                              &referenceHeader,
                                               matrixFile,
                                               reference,
                                               measured,
                                               baseline,
                                               statistics,
-                                              elapsed);
+                                              elapsed,
+                                              browserTime);
             if (!storage_.saveResultReport(baseName, report, reportFile, error)) {
                 setState(TestState::Failed, error);
             } else {
@@ -280,9 +317,7 @@ bool TestEngine::runScan(uint8_t* measured, uint8_t* baseline, String& error) {
             return false;
         }
 
-        if (!bitAtRow(row, source)) {
-            ++runningStats.sourceDriveErrors;
-        }
+        if (!bitAtRow(row, source)) ++runningStats.sourceDriveErrors;
 
         for (size_t i = 0; i < AppConfig::ROW_BYTES; ++i) {
             row[i] &= static_cast<uint8_t>(~baseline[i]);
@@ -311,9 +346,7 @@ bool TestEngine::runScan(uint8_t* measured, uint8_t* baseline, String& error) {
 
 bool TestEngine::readRowWithRetry(uint8_t* row, String& error) {
     for (uint8_t attempt = 0; attempt <= AppConfig::UNSTABLE_RETRY_COUNT; ++attempt) {
-        if (matrix_.readAllLowMask(row, error)) {
-            return true;
-        }
+        if (matrix_.readAllLowMask(row, error)) return true;
         delay(1);
     }
     return false;
@@ -349,18 +382,55 @@ void TestEngine::analyze(const uint8_t* reference,
 }
 
 String TestEngine::buildReport(const String& referenceFile,
+                               const ReferenceFileHeader* referenceHeader,
                                const String& matrixFile,
                                const uint8_t* reference,
                                const uint8_t* measured,
                                const uint8_t* baseline,
                                const ScanStatistics& statistics,
-                               uint32_t elapsedMs) {
+                               uint32_t elapsedMs,
+                               const BrowserTimeContext& browserTime) {
+    const uint64_t finishedAtEpochMs = browserTime.startedAtEpochMs + elapsedMs;
     String json;
-    json.reserve(65536);
-    json += "{\"schema\":1";
+    json.reserve(70000);
+    json += "{\"schema\":2";
     json += ",\"reference\":\"" + jsonEscape(referenceFile) + "\"";
     json += ",\"matrixFile\":\"" + jsonEscape(matrixFile) + "\"";
+    json += ",\"measurementMatrixCrc32\":" + String(StorageManager::crc32(measured, AppConfig::MATRIX_BYTES));
     json += ",\"elapsedMs\":" + String(elapsedMs);
+
+    json += ",\"time\":{";
+    json += "\"source\":\"browser\"";
+    json += ",\"startedAtEpochMs\":" + uint64ToString(browserTime.startedAtEpochMs);
+    json += ",\"finishedAtEpochMs\":" + uint64ToString(finishedAtEpochMs);
+    json += ",\"startedAtUtc\":\"" + jsonEscape(BrowserTime::formatUtc(browserTime.startedAtEpochMs)) + "\"";
+    json += ",\"finishedAtUtc\":\"" + jsonEscape(BrowserTime::formatUtc(finishedAtEpochMs)) + "\"";
+    json += ",\"startedAtLocal\":\"" + jsonEscape(BrowserTime::formatLocal(browserTime.startedAtEpochMs, browserTime.utcOffsetMinutes)) + "\"";
+    json += ",\"finishedAtLocal\":\"" + jsonEscape(BrowserTime::formatLocal(finishedAtEpochMs, browserTime.utcOffsetMinutes)) + "\"";
+    json += ",\"utcOffsetMinutes\":" + String(browserTime.utcOffsetMinutes);
+    json += ",\"timeZone\":\"" + jsonEscape(browserTime.timeZone) + "\"}";
+
+    if (referenceHeader != nullptr) {
+        json += ",\"referenceMetadata\":{";
+        json += "\"formatVersion\":" + String(referenceHeader->version);
+        json += ",\"name\":\"" + jsonEscape(referenceHeader->name) + "\"";
+        json += ",\"cableType\":\"" + jsonEscape(referenceHeader->cableType) + "\"";
+        json += ",\"revision\":\"" + jsonEscape(referenceHeader->revision) + "\"";
+        json += ",\"deviceId\":\"" + jsonEscape(referenceHeader->deviceId) + "\"";
+        json += ",\"deviceModel\":\"" + jsonEscape(referenceHeader->deviceModel) + "\"";
+        json += ",\"firmwareVersion\":\"" + jsonEscape(referenceHeader->firmwareVersion) + "\"";
+        json += ",\"operator\":\"" + jsonEscape(referenceHeader->operatorName) + "\"";
+        json += ",\"comment\":\"" + jsonEscape(referenceHeader->comment) + "\"";
+        json += ",\"approvalStatus\":\"" + jsonEscape(referenceHeader->approvalStatus) + "\"";
+        json += ",\"mappingCrc32\":" + String(referenceHeader->mappingCrc32);
+        json += ",\"matrixCrc32\":" + String(referenceHeader->matrixCrc32);
+        json += ",\"createdAtEpochMs\":" + uint64ToString(referenceHeader->createdAtEpochMs);
+        json += ",\"createdAtUtc\":\"" + jsonEscape(BrowserTime::formatUtc(referenceHeader->createdAtEpochMs)) + "\"";
+        json += ",\"createdAtLocal\":\"" + jsonEscape(BrowserTime::formatLocal(referenceHeader->createdAtEpochMs, referenceHeader->utcOffsetMinutes)) + "\"";
+        json += ",\"utcOffsetMinutes\":" + String(referenceHeader->utcOffsetMinutes);
+        json += ",\"timeZone\":\"" + jsonEscape(referenceHeader->timeZone) + "\"}";
+    }
+
     json += ",\"passed\":";
     json += (statistics.missingLinks == 0 && statistics.extraLinks == 0 &&
              statistics.asymmetricLinks == 0 && statistics.sourceDriveErrors == 0)
