@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "AppConfig.h"
+#include "BrowserTime.h"
 
 bool StorageManager::begin(String& error) {
     staticMounted_ = LittleFS.begin(true, AppConfig::STATIC_FS_BASE, 10, "littlefs");
@@ -104,6 +105,12 @@ bool StorageManager::saveReference(const String& name,
         return false;
     }
 
+    const BrowserTimeContext browserTime = BrowserTime::snapshot();
+    if (!browserTime.valid()) {
+        error = "Дата и время браузера не были переданы";
+        return false;
+    }
+
     const String base = sanitizeBaseName(name);
     const String finalPath = String(AppConfig::REFERENCE_DIR) + "/" + base + ".ref";
     const String tempPath = finalPath + ".tmp";
@@ -116,7 +123,7 @@ bool StorageManager::saveReference(const String& name,
     header.matrixBytes = AppConfig::MATRIX_BYTES;
     header.matrixCrc32 = crc32(matrix, AppConfig::MATRIX_BYTES);
     header.mappingCrc32 = mappingCrc32;
-    header.createdAtMs = millis();
+    header.createdAtMs = browserTime.startedAtEpochMs;
     strlcpy(header.name, name.c_str(), sizeof(header.name));
 
     FFat.remove(tempPath);
@@ -220,6 +227,39 @@ bool StorageManager::saveResultReport(const String& baseName,
                                       const String& json,
                                       String& savedFile,
                                       String& error) {
+    JsonDocument document;
+    const DeserializationError parseError = deserializeJson(document, json);
+    if (parseError || !document.is<JsonObject>()) {
+        error = "Не удалось добавить дату браузера в JSON-отчёт";
+        return false;
+    }
+
+    const BrowserTimeContext browserTime = BrowserTime::snapshot();
+    if (!browserTime.valid()) {
+        error = "Дата и время браузера не были переданы";
+        return false;
+    }
+
+    const uint32_t elapsedMs = document["elapsedMs"] | 0U;
+    const uint64_t finishedAtEpochMs = browserTime.startedAtEpochMs + elapsedMs;
+    document["schema"] = 2;
+    JsonObject time = document["time"].to<JsonObject>();
+    time["source"] = "browser";
+    time["startedAtEpochMs"] = browserTime.startedAtEpochMs;
+    time["finishedAtEpochMs"] = finishedAtEpochMs;
+    time["startedAtUtc"] = BrowserTime::formatUtc(browserTime.startedAtEpochMs);
+    time["finishedAtUtc"] = BrowserTime::formatUtc(finishedAtEpochMs);
+    time["startedAtLocal"] = BrowserTime::formatLocal(browserTime.startedAtEpochMs,
+                                                       browserTime.utcOffsetMinutes);
+    time["finishedAtLocal"] = BrowserTime::formatLocal(finishedAtEpochMs,
+                                                        browserTime.utcOffsetMinutes);
+    time["utcOffsetMinutes"] = browserTime.utcOffsetMinutes;
+    time["timeZone"] = browserTime.timeZone;
+
+    String enrichedJson;
+    enrichedJson.reserve(json.length() + 512);
+    serializeJson(document, enrichedJson);
+
     const String base = sanitizeBaseName(baseName);
     const String finalPath = String(AppConfig::RESULT_DIR) + "/" + base + ".json";
     File file = FFat.open(finalPath, FILE_WRITE);
@@ -227,7 +267,7 @@ bool StorageManager::saveResultReport(const String& baseName,
         error = "Не удалось создать JSON-отчёт";
         return false;
     }
-    const bool ok = file.print(json) == json.length();
+    const bool ok = file.print(enrichedJson) == enrichedJson.length();
     file.flush();
     file.close();
     if (!ok) {
