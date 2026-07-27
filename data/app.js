@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 let busy = false;
 let lastResultLoaded = "";
+let eventSource;
 
 function toast(message) {
   const el = $("toast");
@@ -15,10 +16,17 @@ async function api(url, options = {}) {
   const text = await response.text();
   let data;
   try { data = JSON.parse(text); } catch { data = text; }
-  if (!response.ok) {
-    throw new Error(data?.error || text || `HTTP ${response.status}`);
-  }
+  if (!response.ok) throw new Error(data?.error || text || `HTTP ${response.status}`);
   return data;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function setBusy(value) {
@@ -34,7 +42,7 @@ function formatSeconds(ms) {
 }
 
 function updateStatus(status) {
-  const active = ["preparing", "scanning", "saving"].includes(status.state);
+  const active = ["preparing", "scanning", "analyzing", "saving"].includes(status.state);
   setBusy(active);
   $("progressBar").style.width = `${status.progress || 0}%`;
   $("progressText").textContent = `${status.currentSource || 0} / ${status.totalSources || 1024}`;
@@ -44,7 +52,7 @@ function updateStatus(status) {
   const badge = $("stateBadge");
   badge.textContent = ({
     idle: "Ожидание", preparing: "Подготовка", scanning: "Измерение",
-    saving: "Сохранение", completed: "Завершено", failed: "Ошибка"
+    analyzing: "Расчёт", saving: "Сохранение", completed: "Завершено", failed: "Ошибка"
   })[status.state] || status.state;
   badge.className = `badge ${status.state === 'completed' ? 'ok' : status.state === 'failed' ? 'error' : active ? 'busy' : 'neutral'}`;
 
@@ -59,21 +67,31 @@ function updateStatus(status) {
   }
 }
 
-async function pollStatus() {
-  try {
-    updateStatus(await api("/api/status"));
-  } catch (error) {
-    $("statusMessage").textContent = `Нет связи с устройством: ${error.message}`;
-  } finally {
-    setTimeout(pollStatus, busy ? 350 : 1200);
-  }
+async function loadInitialStatus() {
+  try { updateStatus(await api("/api/status")); }
+  catch (error) { $("statusMessage").textContent = `Нет связи с устройством: ${error.message}`; }
+}
+
+function connectEvents() {
+  if (eventSource) eventSource.close();
+  eventSource = new EventSource("/api/events");
+  eventSource.addEventListener("status", (event) => {
+    try { updateStatus(JSON.parse(event.data)); }
+    catch (error) { console.error("Некорректное SSE-состояние", error); }
+  });
+  eventSource.addEventListener("files", () => loadFiles());
+  eventSource.onopen = () => document.body.classList.remove("offline");
+  eventSource.onerror = () => {
+    document.body.classList.add("offline");
+    $("statusMessage").textContent = "SSE-соединение восстанавливается…";
+  };
 }
 
 async function loadDevice() {
   try {
     const device = await api("/api/device");
     const badge = $("deviceBadge");
-    badge.textContent = `${device.hardware} · ${device.ip} · ${device.link ? 'LINK' : 'NO LINK'}`;
+    badge.textContent = `${device.hardware} · ${device.ip} · ${device.link ? 'LINK' : 'NO LINK'} · ASYNC`;
     badge.className = `badge ${device.link ? 'ok' : 'error'}`;
   } catch (error) {
     $("deviceBadge").textContent = "Нет связи";
@@ -93,21 +111,29 @@ function renderFiles(element, files, type) {
     element.innerHTML = '<div class="empty">Файлов нет.</div>';
     return;
   }
+
   for (const item of files) {
     const row = document.createElement("div");
     row.className = "file-item";
+
     const info = document.createElement("div");
-    info.innerHTML = `<strong>${item.file}</strong><br><small>${fileSize(item.size)}</small>`;
+    const name = document.createElement("strong");
+    name.textContent = item.file;
+    const details = document.createElement("small");
+    details.textContent = `${fileSize(item.size)}${item.kind ? ` · ${item.kind}` : ""}`;
+    info.append(name, document.createElement("br"), details);
+
     const actions = document.createElement("div");
     actions.className = "file-actions";
-    if (type === "result") {
+    if (type === "calculation" && item.file.endsWith(".json")) {
       const open = document.createElement("button");
       open.textContent = "Открыть";
       open.onclick = () => loadResult(item.file);
       actions.append(open);
     }
+
     const link = document.createElement("a");
-    link.textContent = "Скачать";
+    link.textContent = "Выгрузить";
     link.href = `/api/download?type=${encodeURIComponent(type)}&file=${encodeURIComponent(item.file)}`;
     actions.append(link);
     row.append(info, actions);
@@ -117,8 +143,8 @@ function renderFiles(element, files, type) {
 
 async function loadFiles() {
   try {
-    const [references, results] = await Promise.all([
-      api("/api/references"), api("/api/results")
+    const [references, calculations] = await Promise.all([
+      api("/api/references"), api("/api/calculations")
     ]);
 
     const select = $("referenceSelect");
@@ -134,7 +160,7 @@ async function loadFiles() {
     $("testButton").disabled = busy || !select.value;
 
     renderFiles($("referenceFiles"), references, "reference");
-    renderFiles($("resultFiles"), results, "result");
+    renderFiles($("calculationFiles"), calculations, "calculation");
   } catch (error) {
     toast(error.message);
   }
@@ -145,7 +171,7 @@ function renderPairs(target, pairs, truncated) {
     target.innerHTML = '<div class="empty">Нет.</div>';
     return;
   }
-  const rows = pairs.map((pair) => `<tr><td>${pair.a}</td><td>${pair.aName}</td><td>${pair.b}</td><td>${pair.bName}</td></tr>`).join("");
+  const rows = pairs.map((pair) => `<tr><td>${escapeHtml(pair.a)}</td><td>${escapeHtml(pair.aName)}</td><td>${escapeHtml(pair.b)}</td><td>${escapeHtml(pair.bName)}</td></tr>`).join("");
   target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>A</th><th>Контакт A</th><th>B</th><th>Контакт B</th></tr></thead><tbody>${rows}</tbody></table></div>${truncated ? '<p>Список сокращён. Полное число указано в сводке.</p>' : ''}`;
 }
 
@@ -157,7 +183,7 @@ async function loadResult(fileName) {
     $("resultSummary").className = result.passed ? "result-ok" : "result-error";
     $("resultSummary").innerHTML = `
       <strong>${result.passed ? 'КАБЕЛЬ ИСПРАВЕН' : 'ОБНАРУЖЕНЫ ОТЛИЧИЯ'}</strong><br>
-      Эталон: ${result.reference}<br>
+      Эталон: ${escapeHtml(result.reference || 'не указан')}<br>
       Обрывы: ${summary.missingLinks || 0}; паразитные связи: ${summary.extraLinks || 0};
       асимметрии: ${summary.asymmetricLinks || 0}; время: ${formatSeconds(result.elapsedMs || 0)}.
     `;
@@ -168,6 +194,53 @@ async function loadResult(fileName) {
   } catch (error) {
     toast(error.message);
   }
+}
+
+function uploadFile(kind, input, bar, text) {
+  const file = input.files?.[0];
+  if (!file) return toast("Сначала выберите файл.");
+
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", `/api/upload/${kind}`, true);
+  xhr.responseType = "json";
+
+  input.disabled = true;
+  bar.style.width = "0%";
+  text.textContent = `Загрузка ${file.name}…`;
+
+  xhr.upload.onprogress = (event) => {
+    if (!event.lengthComputable) return;
+    const percent = Math.round((event.loaded * 100) / event.total);
+    bar.style.width = `${percent}%`;
+    text.textContent = `${percent}% · ${fileSize(event.loaded)} / ${fileSize(event.total)}`;
+  };
+
+  xhr.onload = () => {
+    input.disabled = false;
+    const response = xhr.response || {};
+    if (xhr.status >= 200 && xhr.status < 300) {
+      bar.style.width = "100%";
+      text.textContent = `Загружено: ${response.file || file.name}`;
+      input.value = "";
+      toast("Файл проверен и сохранён.");
+      loadFiles();
+    } else {
+      bar.style.width = "0%";
+      text.textContent = response.error || `Ошибка HTTP ${xhr.status}`;
+      toast(text.textContent);
+    }
+  };
+
+  xhr.onerror = () => {
+    input.disabled = false;
+    bar.style.width = "0%";
+    text.textContent = "Ошибка сети при загрузке";
+    toast(text.textContent);
+  };
+
+  xhr.send(form);
 }
 
 $("captureButton").addEventListener("click", async () => {
@@ -190,13 +263,29 @@ $("testButton").addEventListener("click", async () => {
   } catch (error) { toast(error.message); }
 });
 
-$("refreshFilesButton").addEventListener("click", loadFiles);
-$("refreshResultsButton").addEventListener("click", async () => {
-  const files = await api("/api/results");
-  if (files.length) loadResult(files[files.length - 1].file);
+$("referenceUploadButton").addEventListener("click", () => uploadFile(
+  "reference", $("referenceUploadInput"), $("referenceUploadBar"), $("referenceUploadText")
+));
+$("calculationUploadButton").addEventListener("click", () => uploadFile(
+  "calculation", $("calculationUploadInput"), $("calculationUploadBar"), $("calculationUploadText")
+));
+
+$("referenceUploadInput").addEventListener("change", (event) => {
+  $("referenceUploadText").textContent = event.target.files?.[0]?.name || "Файл не выбран";
+});
+$("calculationUploadInput").addEventListener("change", (event) => {
+  $("calculationUploadText").textContent = event.target.files?.[0]?.name || "Файл не выбран";
 });
 
+$("refreshFilesButton").addEventListener("click", loadFiles);
+$("refreshResultsButton").addEventListener("click", async () => {
+  const files = await api("/api/calculations");
+  const reports = files.filter((item) => item.file.endsWith(".json"));
+  if (reports.length) loadResult(reports[reports.length - 1].file);
+});
+
+loadInitialStatus();
+connectEvents();
 loadDevice();
 loadFiles();
-pollStatus();
 setInterval(loadDevice, 10000);
