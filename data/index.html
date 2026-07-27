@@ -10,7 +10,7 @@
   <header class="topbar">
     <div>
       <h1>Контроль кабельных сборок</h1>
-      <p>ESP32-S3 · 64 MCP23017 · 1024 линии</p>
+      <p>ESP32-S3 · 64 MCP23017 · 1024 линии · асинхронный W5500</p>
     </div>
     <div id="deviceBadge" class="badge neutral">Подключение…</div>
   </header>
@@ -40,7 +40,7 @@
 
     <section class="card">
       <h2>Создать эталон</h2>
-      <p>Подключите проверенный кабель. Будет сохранена бинарная матрица 1024×1024.</p>
+      <p>Подключите проверенный кабель. Измерение и сохранение выполняются в фоновой задаче.</p>
       <label>
         Название эталона
         <input id="referenceName" type="text" maxlength="60" placeholder="Например: cable-a-rev-01">
@@ -50,12 +50,39 @@
 
     <section class="card">
       <h2>Проверить кабель</h2>
-      <p>Выберите сохранённый эталон и запустите полное сравнение.</p>
+      <p>Выберите сохранённый или загруженный эталон и запустите полное сравнение.</p>
       <label>
         Эталон
         <select id="referenceSelect"></select>
       </label>
       <button id="testButton" class="primary">Запустить проверку</button>
+    </section>
+
+    <section class="card wide">
+      <div class="card-head">
+        <div>
+          <h2>Загрузка файлов в устройство</h2>
+          <p>Файлы передаются потоково, без блокировки веб-интерфейса.</p>
+        </div>
+      </div>
+      <div class="upload-grid">
+        <div class="upload-box">
+          <h3>Загрузить эталон</h3>
+          <p>Допускается проверенный файл формата <code>.ref</code>. Перед сохранением проверяются заголовок, размер и CRC32.</p>
+          <input id="referenceUploadInput" type="file" accept=".ref,application/octet-stream">
+          <button id="referenceUploadButton" class="secondary">Загрузить эталон</button>
+          <div class="upload-progress"><div id="referenceUploadBar"></div></div>
+          <small id="referenceUploadText">Файл не выбран</small>
+        </div>
+        <div class="upload-box">
+          <h3>Загрузить расчёт</h3>
+          <p>Допускаются JSON-отчёты <code>.json</code> и бинарные матрицы <code>.bin</code>.</p>
+          <input id="calculationUploadInput" type="file" accept=".json,.bin,application/json,application/octet-stream">
+          <button id="calculationUploadButton" class="secondary">Загрузить расчёт</button>
+          <div class="upload-progress"><div id="calculationUploadBar"></div></div>
+          <small id="calculationUploadText">Файл не выбран</small>
+        </div>
+      </div>
     </section>
 
     <section class="card wide">
@@ -76,7 +103,7 @@
 
     <section class="card wide">
       <div class="card-head">
-        <h2>Файлы</h2>
+        <h2>Хранилище</h2>
         <button id="refreshFilesButton" class="secondary">Обновить</button>
       </div>
       <div class="files-columns">
@@ -85,8 +112,8 @@
           <div id="referenceFiles" class="file-list"></div>
         </div>
         <div>
-          <h3>Результаты</h3>
-          <div id="resultFiles" class="file-list"></div>
+          <h3>Расчёты и матрицы</h3>
+          <div id="calculationFiles" class="file-list"></div>
         </div>
       </div>
     </section>
