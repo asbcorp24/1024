@@ -4,9 +4,109 @@
 #include <FFat.h>
 #include <LittleFS.h>
 #include <Network.h>
+#include <cstdlib>
 
 #include "AppConfig.h"
 #include "BrowserTime.h"
+
+namespace {
+
+String queryParameter(AsyncWebServerRequest* request, const char* name) {
+    if (!request->hasParam(name)) return "";
+    return request->getParam(name)->value();
+}
+
+bool copyRequired(AsyncWebServerRequest* request,
+                  const char* parameterName,
+                  const char* fieldName,
+                  char* destination,
+                  size_t destinationSize,
+                  String& error) {
+    String value = queryParameter(request, parameterName);
+    value.trim();
+    if (value.isEmpty()) {
+        error = String("Не заполнено поле: ") + fieldName;
+        return false;
+    }
+    if (value.length() >= destinationSize) {
+        error = String("Слишком длинное поле: ") + fieldName;
+        return false;
+    }
+    strlcpy(destination, value.c_str(), destinationSize);
+    return true;
+}
+
+bool parseMappingCrc(const String& input, uint32_t& value, String& error) {
+    String text = input;
+    text.trim();
+    if (text.isEmpty()) {
+        value = 0;
+        return true;
+    }
+    if (text.startsWith("0x") || text.startsWith("0X")) text.remove(0, 2);
+    if (text.isEmpty() || text.length() > 8) {
+        error = "CRC32 таблицы должен содержать не более 8 hex-символов";
+        return false;
+    }
+    for (size_t i = 0; i < text.length(); ++i) {
+        const char c = text[i];
+        const bool hex = (c >= '0' && c <= '9') ||
+                         (c >= 'a' && c <= 'f') ||
+                         (c >= 'A' && c <= 'F');
+        if (!hex) {
+            error = "CRC32 таблицы содержит недопустимые символы";
+            return false;
+        }
+    }
+    value = static_cast<uint32_t>(strtoul(text.c_str(), nullptr, 16));
+    return true;
+}
+
+bool validApprovalStatus(const String& status) {
+    return status == "draft" || status == "pending" || status == "approved" ||
+           status == "rejected" || status == "archived";
+}
+
+bool parseBrowserTime(AsyncWebServerRequest* request,
+                      BrowserTimeContext& browserTime,
+                      String& error) {
+    return BrowserTime::parseFromBrowser(queryParameter(request, "epochMs"),
+                                         queryParameter(request, "offsetMinutes"),
+                                         queryParameter(request, "timeZone"),
+                                         browserTime,
+                                         error);
+}
+
+bool parseReferenceMetadata(AsyncWebServerRequest* request,
+                            ReferenceCaptureMetadata& metadata,
+                            String& error) {
+    if (!parseBrowserTime(request, metadata.time, error)) return false;
+    if (!copyRequired(request, "name", "Название эталона", metadata.name, sizeof(metadata.name), error)) return false;
+    if (!copyRequired(request, "cableType", "Тип кабельной сборки", metadata.cableType, sizeof(metadata.cableType), error)) return false;
+    if (!copyRequired(request, "revision", "Ревизия", metadata.revision, sizeof(metadata.revision), error)) return false;
+    if (!copyRequired(request, "deviceId", "Прибор", metadata.deviceId, sizeof(metadata.deviceId), error)) return false;
+    if (!copyRequired(request, "operator", "Оператор", metadata.operatorName, sizeof(metadata.operatorName), error)) return false;
+
+    String comment = queryParameter(request, "comment");
+    comment.trim();
+    if (comment.length() >= sizeof(metadata.comment)) {
+        error = "Комментарий превышает 255 символов";
+        return false;
+    }
+    strlcpy(metadata.comment, comment.c_str(), sizeof(metadata.comment));
+
+    String approvalStatus = queryParameter(request, "approvalStatus");
+    approvalStatus.trim();
+    if (!validApprovalStatus(approvalStatus)) {
+        error = "Недопустимый статус утверждения эталона";
+        return false;
+    }
+    strlcpy(metadata.approvalStatus, approvalStatus.c_str(), sizeof(metadata.approvalStatus));
+
+    return parseMappingCrc(queryParameter(request, "mappingCrc32"), metadata.mappingCrc32, error);
+}
+
+} // namespace
 
 WebApp* WebApp::instance_ = nullptr;
 
@@ -162,30 +262,26 @@ void WebApp::configureRoutes() {
 
     server_.on("/api/reference/capture", HTTP_POST, [this](AsyncWebServerRequest* request) {
         String error;
-        if (!BrowserTime::setFromBrowser(parameter(request, "epochMs"),
-                                         parameter(request, "offsetMinutes"),
-                                         parameter(request, "timeZone"),
-                                         error)) {
+        ReferenceCaptureMetadata metadata;
+        if (!parseReferenceMetadata(request, metadata, error)) {
             sendError(request, 400, error);
             return;
         }
-        if (!engine_.startReferenceCapture(parameter(request, "name"), error)) {
+        if (!engine_.startReferenceCapture(metadata, error)) {
             sendError(request, 409, error);
             return;
         }
-        sendJson(request, 202, "{\"ok\":true,\"message\":\"Эталонный замер запущен\",\"timeSource\":\"browser\"}");
+        sendJson(request, 202, "{\"ok\":true,\"message\":\"Эталон v2 запущен\",\"timeSource\":\"browser\"}");
     });
 
     server_.on("/api/test/start", HTTP_POST, [this](AsyncWebServerRequest* request) {
         String error;
-        if (!BrowserTime::setFromBrowser(parameter(request, "epochMs"),
-                                         parameter(request, "offsetMinutes"),
-                                         parameter(request, "timeZone"),
-                                         error)) {
+        BrowserTimeContext browserTime;
+        if (!parseBrowserTime(request, browserTime, error)) {
             sendError(request, 400, error);
             return;
         }
-        if (!engine_.startComparison(parameter(request, "reference"), error)) {
+        if (!engine_.startComparison(parameter(request, "reference"), browserTime, error)) {
             sendError(request, 409, error);
             return;
         }
@@ -212,11 +308,9 @@ void WebApp::configureRoutes() {
     server_.on("/api/events", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
         request->send(204);
     });
-
     server_.on("/api/upload/reference", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
         request->send(204);
     });
-
     server_.on("/api/upload/calculation", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
         request->send(204);
     });
@@ -276,9 +370,7 @@ void WebApp::handleUploadChunk(AsyncWebServerRequest* request,
     if (context->error.isEmpty() && len > 0) {
         const size_t written = request->_tempFile.write(data, len);
         context->received += written;
-        if (written != len) {
-            context->error = "Загруженный файл записан не полностью";
-        }
+        if (written != len) context->error = "Загруженный файл записан не полностью";
     }
 
     if (!final) return;
@@ -338,6 +430,9 @@ void WebApp::sendDevice(AsyncWebServerRequest* request) {
     doc["hasIp"] = ethHasIp_;
     doc["started"] = ethStarted_;
     doc["hardware"] = "W5500";
+    doc["deviceModel"] = AppConfig::DEVICE_MODEL;
+    doc["firmwareVersion"] = AppConfig::FIRMWARE_VERSION;
+    doc["referenceFormatVersion"] = AppConfig::FILE_FORMAT_VERSION;
     doc["mac"] = ETH.macAddress();
     doc["freeHeap"] = ESP.getFreeHeap();
     doc["freePsram"] = ESP.getFreePsram();
@@ -387,8 +482,7 @@ void WebApp::sendError(AsyncWebServerRequest* request, int statusCode, const Str
 }
 
 String WebApp::parameter(AsyncWebServerRequest* request, const char* name) {
-    if (!request->hasParam(name)) return "";
-    return request->getParam(name)->value();
+    return queryParameter(request, name);
 }
 
 String WebApp::uploadKindName(UploadKind kind) {
