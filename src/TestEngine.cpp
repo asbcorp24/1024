@@ -1,0 +1,522 @@
+#include "TestEngine.h"
+
+#include <ArduinoJson.h>
+#include <esp_heap_caps.h>
+#include <cstring>
+
+TestEngine::TestEngine(McpMatrix& matrix, StorageManager& storage)
+    : matrix_(matrix), storage_(storage) {}
+
+void TestEngine::begin(bool hardwareReady, const String& hardwareMessage) {
+    if (mutex_ == nullptr) {
+        mutex_ = xSemaphoreCreateMutex();
+    }
+    hardwareReady_ = hardwareReady;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    snapshot_ = EngineSnapshot{};
+    strlcpy(snapshot_.message,
+            hardwareReady ? "Система готова" : hardwareMessage.c_str(),
+            sizeof(snapshot_.message));
+    if (!hardwareReady) snapshot_.state = TestState::Failed;
+    xSemaphoreGive(mutex_);
+}
+
+bool TestEngine::isBusy() const {
+    if (mutex_ == nullptr) return false;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    const bool busy = snapshot_.state == TestState::Preparing ||
+                      snapshot_.state == TestState::Scanning ||
+                      snapshot_.state == TestState::Saving;
+    xSemaphoreGive(mutex_);
+    return busy;
+}
+
+bool TestEngine::startReferenceCapture(const String& name, String& error) {
+    if (!hardwareReady_) {
+        error = "Аппаратная матрица MCP23017 не готова";
+        return false;
+    }
+    if (isBusy()) {
+        error = "Уже выполняется другое измерение";
+        return false;
+    }
+
+    requestedMode_ = TestMode::CaptureReference;
+    requestedValue_ = name.length() ? name : "reference";
+
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    snapshot_ = EngineSnapshot{};
+    snapshot_.mode = requestedMode_;
+    snapshot_.state = TestState::Preparing;
+    strlcpy(snapshot_.activeReference, requestedValue_.c_str(), sizeof(snapshot_.activeReference));
+    strlcpy(snapshot_.message, "Подготовка эталонного измерения", sizeof(snapshot_.message));
+    xSemaphoreGive(mutex_);
+
+    if (xTaskCreatePinnedToCore(taskEntry, "cable-test", 12288, this, 2, &taskHandle_, 0) != pdPASS) {
+        taskHandle_ = nullptr;
+        setState(TestState::Failed, "Не удалось создать задачу измерения");
+        error = "Не удалось создать задачу FreeRTOS";
+        return false;
+    }
+    return true;
+}
+
+bool TestEngine::startComparison(const String& referenceFile, String& error) {
+    if (!hardwareReady_) {
+        error = "Аппаратная матрица MCP23017 не готова";
+        return false;
+    }
+    if (isBusy()) {
+        error = "Уже выполняется другое измерение";
+        return false;
+    }
+    if (!StorageManager::safeFileName(referenceFile) || !referenceFile.endsWith(".ref")) {
+        error = "Выбран некорректный файл эталона";
+        return false;
+    }
+
+    requestedMode_ = TestMode::Compare;
+    requestedValue_ = referenceFile;
+
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    snapshot_ = EngineSnapshot{};
+    snapshot_.mode = requestedMode_;
+    snapshot_.state = TestState::Preparing;
+    strlcpy(snapshot_.activeReference, requestedValue_.c_str(), sizeof(snapshot_.activeReference));
+    strlcpy(snapshot_.message, "Загрузка эталона", sizeof(snapshot_.message));
+    xSemaphoreGive(mutex_);
+
+    if (xTaskCreatePinnedToCore(taskEntry, "cable-test", 12288, this, 2, &taskHandle_, 0) != pdPASS) {
+        taskHandle_ = nullptr;
+        setState(TestState::Failed, "Не удалось создать задачу измерения");
+        error = "Не удалось создать задачу FreeRTOS";
+        return false;
+    }
+    return true;
+}
+
+void TestEngine::taskEntry(void* parameter) {
+    static_cast<TestEngine*>(parameter)->runTask();
+}
+
+uint8_t* TestEngine::allocateMatrix() {
+    auto* matrix = static_cast<uint8_t*>(heap_caps_malloc(AppConfig::MATRIX_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (matrix == nullptr) {
+        matrix = static_cast<uint8_t*>(heap_caps_malloc(AppConfig::MATRIX_BYTES, MALLOC_CAP_8BIT));
+    }
+    if (matrix != nullptr) memset(matrix, 0, AppConfig::MATRIX_BYTES);
+    return matrix;
+}
+
+void TestEngine::runTask() {
+    const uint32_t startedMs = millis();
+    String error;
+    uint8_t* measured = allocateMatrix();
+    uint8_t* reference = nullptr;
+    auto* baseline = static_cast<uint8_t*>(calloc(AppConfig::ROW_BYTES, 1));
+
+    if (measured == nullptr || baseline == nullptr) {
+        setState(TestState::Failed, "Недостаточно памяти для матрицы 1024×1024");
+        if (measured) free(measured);
+        if (baseline) free(baseline);
+        finishTask();
+        return;
+    }
+
+    ReferenceFileHeader referenceHeader{};
+    const TestMode mode = requestedMode_;
+    const String requestedValue = requestedValue_;
+
+    if (mode == TestMode::Compare) {
+        reference = allocateMatrix();
+        if (reference == nullptr) {
+            setState(TestState::Failed, "Недостаточно памяти для загрузки эталона");
+            free(measured);
+            free(baseline);
+            finishTask();
+            return;
+        }
+        if (!storage_.loadReference(requestedValue, reference, referenceHeader, error)) {
+            setState(TestState::Failed, error);
+            free(reference);
+            free(measured);
+            free(baseline);
+            finishTask();
+            return;
+        }
+    }
+
+    setState(TestState::Preparing, "Все 1024 линии переводятся во вход с подтяжкой");
+    if (!matrix_.setAllInputs(error)) {
+        setState(TestState::Failed, error);
+        if (reference) free(reference);
+        free(measured);
+        free(baseline);
+        finishTask();
+        return;
+    }
+    delay(2);
+
+    if (!readRowWithRetry(baseline, error)) {
+        setState(TestState::Failed, "Не удалось выполнить фоновое измерение: " + error);
+        if (reference) free(reference);
+        free(measured);
+        free(baseline);
+        finishTask();
+        return;
+    }
+
+    ScanStatistics statistics;
+    for (uint16_t pin = 0; pin < AppConfig::PIN_COUNT; ++pin) {
+        if (bitAtRow(baseline, pin)) ++statistics.stuckLowPins;
+    }
+    setStatistics(statistics);
+
+    setState(TestState::Scanning, "Выполняется полный перебор 1024 источников");
+    if (!runScan(measured, baseline, error)) {
+        setState(TestState::Failed, error);
+        if (reference) free(reference);
+        free(measured);
+        free(baseline);
+        finishTask();
+        return;
+    }
+
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    statistics.stuckLowPins = snapshot_.statistics.stuckLowPins;
+    statistics.sourceDriveErrors = snapshot_.statistics.sourceDriveErrors;
+    statistics.i2cErrors = snapshot_.statistics.i2cErrors;
+    xSemaphoreGive(mutex_);
+
+    analyze(reference, measured, statistics);
+    setStatistics(statistics);
+    setState(TestState::Saving, "Сохранение файлов измерения");
+
+    if (mode == TestMode::CaptureReference) {
+        String savedReference;
+        if (!storage_.saveReference(requestedValue, measured, 0, savedReference, error)) {
+            setState(TestState::Failed, error);
+        } else {
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            strlcpy(snapshot_.activeReference, savedReference.c_str(), sizeof(snapshot_.activeReference));
+            strlcpy(snapshot_.message, "Эталон успешно сохранён", sizeof(snapshot_.message));
+            snapshot_.elapsedMs = millis() - startedMs;
+            snapshot_.state = TestState::Completed;
+            xSemaphoreGive(mutex_);
+        }
+    } else {
+        const uint32_t sequence = storage_.nextResultSequence();
+        char baseBuffer[32];
+        snprintf(baseBuffer, sizeof(baseBuffer), "result-%06lu", static_cast<unsigned long>(sequence));
+        const String baseName(baseBuffer);
+        String matrixFile;
+        String reportFile;
+
+        if (!storage_.saveMeasurement(baseName, measured, matrixFile, error)) {
+            setState(TestState::Failed, error);
+        } else {
+            const uint32_t elapsed = millis() - startedMs;
+            const String report = buildReport(requestedValue,
+                                              matrixFile,
+                                              reference,
+                                              measured,
+                                              baseline,
+                                              statistics,
+                                              elapsed);
+            if (!storage_.saveResultReport(baseName, report, reportFile, error)) {
+                setState(TestState::Failed, error);
+            } else {
+                xSemaphoreTake(mutex_, portMAX_DELAY);
+                strlcpy(snapshot_.lastResultFile, reportFile.c_str(), sizeof(snapshot_.lastResultFile));
+                strlcpy(snapshot_.message,
+                        (statistics.missingLinks == 0 && statistics.extraLinks == 0 &&
+                         statistics.asymmetricLinks == 0 && statistics.sourceDriveErrors == 0)
+                            ? "Кабель соответствует эталону"
+                            : "Испытание завершено, обнаружены отличия",
+                        sizeof(snapshot_.message));
+                snapshot_.elapsedMs = elapsed;
+                snapshot_.state = TestState::Completed;
+                xSemaphoreGive(mutex_);
+            }
+        }
+    }
+
+    if (reference) free(reference);
+    free(measured);
+    free(baseline);
+    finishTask();
+}
+
+bool TestEngine::runScan(uint8_t* measured, uint8_t* baseline, String& error) {
+    const uint32_t startedMs = millis();
+    ScanStatistics runningStats;
+    for (uint16_t pin = 0; pin < AppConfig::PIN_COUNT; ++pin) {
+        if (bitAtRow(baseline, pin)) ++runningStats.stuckLowPins;
+    }
+
+    for (uint16_t source = 0; source < AppConfig::PIN_COUNT; ++source) {
+        uint8_t* row = measured + static_cast<size_t>(source) * AppConfig::ROW_BYTES;
+
+        if (bitAtRow(baseline, source)) {
+            ++runningStats.sourceDriveErrors;
+            memset(row, 0, AppConfig::ROW_BYTES);
+            setStatistics(runningStats);
+            setProgress(source + 1, millis() - startedMs);
+            continue;
+        }
+
+        if (!matrix_.drivePinLow(source, error)) {
+            ++runningStats.i2cErrors;
+            setStatistics(runningStats);
+            return false;
+        }
+        delayMicroseconds(AppConfig::SOURCE_SETTLE_US);
+
+        if (!readRowWithRetry(row, error)) {
+            ++runningStats.i2cErrors;
+            String releaseError;
+            matrix_.releasePin(source, releaseError);
+            setStatistics(runningStats);
+            return false;
+        }
+
+        if (!bitAtRow(row, source)) {
+            ++runningStats.sourceDriveErrors;
+        }
+
+        for (size_t i = 0; i < AppConfig::ROW_BYTES; ++i) {
+            row[i] &= static_cast<uint8_t>(~baseline[i]);
+        }
+        clearBitInRow(row, source);
+
+        if (!matrix_.releasePin(source, error)) {
+            ++runningStats.i2cErrors;
+            setStatistics(runningStats);
+            return false;
+        }
+        if (!matrix_.waitPinHigh(source, AppConfig::RELEASE_TIMEOUT_US, error)) {
+            ++runningStats.sourceDriveErrors;
+            String resetError;
+            matrix_.setAllInputs(resetError);
+            setStatistics(runningStats);
+            return false;
+        }
+
+        setStatistics(runningStats);
+        setProgress(source + 1, millis() - startedMs);
+        taskYIELD();
+    }
+    return true;
+}
+
+bool TestEngine::readRowWithRetry(uint8_t* row, String& error) {
+    for (uint8_t attempt = 0; attempt <= AppConfig::UNSTABLE_RETRY_COUNT; ++attempt) {
+        if (matrix_.readAllLowMask(row, error)) {
+            return true;
+        }
+        delay(1);
+    }
+    return false;
+}
+
+void TestEngine::analyze(const uint8_t* reference,
+                         const uint8_t* measured,
+                         ScanStatistics& statistics) {
+    statistics.measuredLinks = 0;
+    statistics.expectedLinks = 0;
+    statistics.missingLinks = 0;
+    statistics.extraLinks = 0;
+    statistics.asymmetricLinks = 0;
+
+    for (uint16_t a = 0; a < AppConfig::PIN_COUNT; ++a) {
+        for (uint16_t b = a + 1; b < AppConfig::PIN_COUNT; ++b) {
+            const bool measuredAB = bitAt(measured, a, b);
+            const bool measuredBA = bitAt(measured, b, a);
+            const bool measuredConnected = measuredAB && measuredBA;
+            if (measuredConnected) ++statistics.measuredLinks;
+            if (measuredAB != measuredBA) ++statistics.asymmetricLinks;
+
+            if (reference != nullptr) {
+                const bool expectedAB = bitAt(reference, a, b);
+                const bool expectedBA = bitAt(reference, b, a);
+                const bool expectedConnected = expectedAB && expectedBA;
+                if (expectedConnected) ++statistics.expectedLinks;
+                if (expectedConnected && !measuredConnected) ++statistics.missingLinks;
+                if (!expectedConnected && measuredConnected) ++statistics.extraLinks;
+            }
+        }
+    }
+}
+
+String TestEngine::buildReport(const String& referenceFile,
+                               const String& matrixFile,
+                               const uint8_t* reference,
+                               const uint8_t* measured,
+                               const uint8_t* baseline,
+                               const ScanStatistics& statistics,
+                               uint32_t elapsedMs) {
+    String json;
+    json.reserve(65536);
+    json += "{\"schema\":1";
+    json += ",\"reference\":\"" + jsonEscape(referenceFile) + "\"";
+    json += ",\"matrixFile\":\"" + jsonEscape(matrixFile) + "\"";
+    json += ",\"elapsedMs\":" + String(elapsedMs);
+    json += ",\"passed\":";
+    json += (statistics.missingLinks == 0 && statistics.extraLinks == 0 &&
+             statistics.asymmetricLinks == 0 && statistics.sourceDriveErrors == 0)
+                ? "true" : "false";
+
+    json += ",\"summary\":{";
+    json += "\"expectedLinks\":" + String(statistics.expectedLinks);
+    json += ",\"measuredLinks\":" + String(statistics.measuredLinks);
+    json += ",\"missingLinks\":" + String(statistics.missingLinks);
+    json += ",\"extraLinks\":" + String(statistics.extraLinks);
+    json += ",\"asymmetricLinks\":" + String(statistics.asymmetricLinks);
+    json += ",\"stuckLowPins\":" + String(statistics.stuckLowPins);
+    json += ",\"sourceDriveErrors\":" + String(statistics.sourceDriveErrors);
+    json += ",\"i2cErrors\":" + String(statistics.i2cErrors) + "}";
+
+    json += ",\"stuckLow\":[";
+    bool first = true;
+    for (uint16_t pin = 0; pin < AppConfig::PIN_COUNT; ++pin) {
+        if (!bitAtRow(baseline, pin)) continue;
+        if (!first) json += ',';
+        first = false;
+        json += "{\"pin\":" + String(pin) + ",\"name\":\"" + jsonEscape(McpMatrix::pinName(pin)) + "\"}";
+    }
+    json += ']';
+
+    auto appendPairs = [&](const char* key, uint8_t mode) {
+        json += ",\"";
+        json += key;
+        json += "\":[";
+        size_t emitted = 0;
+        bool pairFirst = true;
+        for (uint16_t a = 0; a < AppConfig::PIN_COUNT && emitted < MAX_REPORTED_PAIRS; ++a) {
+            for (uint16_t b = a + 1; b < AppConfig::PIN_COUNT && emitted < MAX_REPORTED_PAIRS; ++b) {
+                const bool measuredConnected = bitAt(measured, a, b) && bitAt(measured, b, a);
+                const bool expectedConnected = reference && bitAt(reference, a, b) && bitAt(reference, b, a);
+                const bool asymmetric = bitAt(measured, a, b) != bitAt(measured, b, a);
+                bool include = false;
+                if (mode == 0) include = expectedConnected && !measuredConnected;
+                if (mode == 1) include = !expectedConnected && measuredConnected;
+                if (mode == 2) include = asymmetric;
+                if (!include) continue;
+
+                if (!pairFirst) json += ',';
+                pairFirst = false;
+                json += "{\"a\":" + String(a) + ",\"b\":" + String(b);
+                json += ",\"aName\":\"" + jsonEscape(McpMatrix::pinName(a)) + "\"";
+                json += ",\"bName\":\"" + jsonEscape(McpMatrix::pinName(b)) + "\"}";
+                ++emitted;
+            }
+        }
+        json += ']';
+        json += ",\"";
+        json += key;
+        json += "Truncated\":";
+        const uint32_t total = mode == 0 ? statistics.missingLinks :
+                               mode == 1 ? statistics.extraLinks : statistics.asymmetricLinks;
+        json += total > emitted ? "true" : "false";
+    };
+
+    appendPairs("missing", 0);
+    appendPairs("extra", 1);
+    appendPairs("asymmetric", 2);
+    json += '}';
+    return json;
+}
+
+void TestEngine::setState(TestState state, const String& message) {
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    snapshot_.state = state;
+    strlcpy(snapshot_.message, message.c_str(), sizeof(snapshot_.message));
+    xSemaphoreGive(mutex_);
+}
+
+void TestEngine::setProgress(uint16_t currentSource, uint32_t elapsedMs) {
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    snapshot_.currentSource = currentSource;
+    snapshot_.progressPercent = static_cast<uint8_t>((static_cast<uint32_t>(currentSource) * 100U) / AppConfig::PIN_COUNT);
+    snapshot_.elapsedMs = elapsedMs;
+    xSemaphoreGive(mutex_);
+}
+
+void TestEngine::setStatistics(const ScanStatistics& statistics) {
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    snapshot_.statistics = statistics;
+    xSemaphoreGive(mutex_);
+}
+
+void TestEngine::finishTask() {
+    taskHandle_ = nullptr;
+    vTaskDelete(nullptr);
+}
+
+EngineSnapshot TestEngine::snapshot() {
+    EngineSnapshot copy;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    copy = snapshot_;
+    xSemaphoreGive(mutex_);
+    return copy;
+}
+
+String TestEngine::statusJson() {
+    const EngineSnapshot s = snapshot();
+    JsonDocument doc;
+    doc["mode"] = testModeName(s.mode);
+    doc["state"] = testStateName(s.state);
+    doc["currentSource"] = s.currentSource;
+    doc["totalSources"] = s.totalSources;
+    doc["progress"] = s.progressPercent;
+    doc["elapsedMs"] = s.elapsedMs;
+    doc["reference"] = s.activeReference;
+    doc["lastResult"] = s.lastResultFile;
+    doc["message"] = s.message;
+
+    JsonObject stats = doc["statistics"].to<JsonObject>();
+    stats["expectedLinks"] = s.statistics.expectedLinks;
+    stats["measuredLinks"] = s.statistics.measuredLinks;
+    stats["missingLinks"] = s.statistics.missingLinks;
+    stats["extraLinks"] = s.statistics.extraLinks;
+    stats["asymmetricLinks"] = s.statistics.asymmetricLinks;
+    stats["stuckLowPins"] = s.statistics.stuckLowPins;
+    stats["sourceDriveErrors"] = s.statistics.sourceDriveErrors;
+    stats["i2cErrors"] = s.statistics.i2cErrors;
+
+    String json;
+    serializeJson(doc, json);
+    return json;
+}
+
+bool TestEngine::bitAt(const uint8_t* matrix, uint16_t row, uint16_t column) {
+    const size_t offset = static_cast<size_t>(row) * AppConfig::ROW_BYTES + (column >> 3);
+    return (matrix[offset] & (1U << (column & 0x07))) != 0;
+}
+
+bool TestEngine::bitAtRow(const uint8_t* row, uint16_t column) {
+    return (row[column >> 3] & (1U << (column & 0x07))) != 0;
+}
+
+void TestEngine::clearBitInRow(uint8_t* row, uint16_t column) {
+    row[column >> 3] &= static_cast<uint8_t>(~(1U << (column & 0x07)));
+}
+
+String TestEngine::jsonEscape(const String& value) {
+    String result;
+    result.reserve(value.length() + 8);
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char c = value[i];
+        switch (c) {
+            case '\\': result += "\\\\"; break;
+            case '"': result += "\\\""; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default:
+                if (static_cast<uint8_t>(c) >= 0x20) result += c;
+                break;
+        }
+    }
+    return result;
+}
