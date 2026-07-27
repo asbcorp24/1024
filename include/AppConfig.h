@@ -43,6 +43,14 @@ const IPAddress DEFAULT_STATIC_IP(192, 168, 1, 204);
 const IPAddress DEFAULT_STATIC_DNS(192, 168, 1, 1);
 const IPAddress DEFAULT_STATIC_GATEWAY(192, 168, 1, 1);
 const IPAddress DEFAULT_STATIC_SUBNET(255, 255, 255, 0);
+
+// Заполняются из NVS в setup() до WebApp::begin().
+extern bool USE_DHCP;
+extern IPAddress STATIC_IP;
+extern IPAddress STATIC_DNS;
+extern IPAddress STATIC_GATEWAY;
+extern IPAddress STATIC_SUBNET;
+
 constexpr uint16_t HTTP_PORT = 80;
 
 constexpr size_t DIRECTION_COUNT = 8;
