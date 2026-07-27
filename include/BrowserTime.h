@@ -15,12 +15,12 @@ struct BrowserTimeContext {
 
 namespace BrowserTime {
 
-bool setFromBrowser(const String& epochMs,
-                    const String& utcOffsetMinutes,
-                    const String& timeZone,
-                    String& error);
+bool parseFromBrowser(const String& epochMs,
+                      const String& utcOffsetMinutes,
+                      const String& timeZone,
+                      BrowserTimeContext& context,
+                      String& error);
 
-BrowserTimeContext snapshot();
 String formatUtc(uint64_t epochMs);
 String formatLocal(uint64_t epochMs, int16_t utcOffsetMinutes);
 
