@@ -7,6 +7,19 @@
 #include "StorageManager.h"
 #include "TestEngine.h"
 
+// Arduino Ethernet 2.0.2 объявляет begin() без параметров, тогда как
+// ESP32 Server требует чисто виртуальный begin(uint16_t). Адаптер закрывает
+// эту несовместимость, сохраняя порт, переданный конструктору EthernetServer.
+class Esp32EthernetServer : public EthernetServer {
+public:
+    explicit Esp32EthernetServer(uint16_t port) : EthernetServer(port) {}
+
+    void begin(uint16_t port = 0) override {
+        (void)port;
+        EthernetServer::begin();
+    }
+};
+
 class WebApp {
 public:
     WebApp(StorageManager& storage, TestEngine& engine);
@@ -18,7 +31,7 @@ public:
 private:
     StorageManager& storage_;
     TestEngine& engine_;
-    EthernetServer server_;
+    Esp32EthernetServer server_;
     uint32_t lastMaintainMs_ = 0;
 
     void resetW5500();
