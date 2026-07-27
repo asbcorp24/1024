@@ -6,6 +6,7 @@
 #include <Network.h>
 
 #include "AppConfig.h"
+#include "BrowserTime.h"
 
 WebApp* WebApp::instance_ = nullptr;
 
@@ -161,20 +162,34 @@ void WebApp::configureRoutes() {
 
     server_.on("/api/reference/capture", HTTP_POST, [this](AsyncWebServerRequest* request) {
         String error;
+        if (!BrowserTime::setFromBrowser(parameter(request, "epochMs"),
+                                         parameter(request, "offsetMinutes"),
+                                         parameter(request, "timeZone"),
+                                         error)) {
+            sendError(request, 400, error);
+            return;
+        }
         if (!engine_.startReferenceCapture(parameter(request, "name"), error)) {
             sendError(request, 409, error);
             return;
         }
-        sendJson(request, 202, "{\"ok\":true,\"message\":\"Эталонный замер запущен\"}");
+        sendJson(request, 202, "{\"ok\":true,\"message\":\"Эталонный замер запущен\",\"timeSource\":\"browser\"}");
     });
 
     server_.on("/api/test/start", HTTP_POST, [this](AsyncWebServerRequest* request) {
         String error;
+        if (!BrowserTime::setFromBrowser(parameter(request, "epochMs"),
+                                         parameter(request, "offsetMinutes"),
+                                         parameter(request, "timeZone"),
+                                         error)) {
+            sendError(request, 400, error);
+            return;
+        }
         if (!engine_.startComparison(parameter(request, "reference"), error)) {
             sendError(request, 409, error);
             return;
         }
-        sendJson(request, 202, "{\"ok\":true,\"message\":\"Проверка запущена\"}");
+        sendJson(request, 202, "{\"ok\":true,\"message\":\"Проверка запущена\",\"timeSource\":\"browser\"}");
     });
 
     server_.on("/api/result", HTTP_GET, [this](AsyncWebServerRequest* request) {
@@ -328,6 +343,7 @@ void WebApp::sendDevice(AsyncWebServerRequest* request) {
     doc["freePsram"] = ESP.getFreePsram();
     doc["flashSize"] = ESP.getFlashChipSize();
     doc["asyncWeb"] = true;
+    doc["timeSource"] = "browser";
 
     String json;
     serializeJson(doc, json);
