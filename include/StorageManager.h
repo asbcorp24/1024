@@ -13,10 +13,8 @@ public:
     String listResultsJson();
     String listCalculationsJson();
 
-    bool saveReference(const String& name,
+    bool saveReference(const ReferenceCaptureMetadata& metadata,
                        const uint8_t* matrix,
-                       uint32_t mappingCrc32,
-                       uint64_t createdAtEpochMs,
                        String& savedFile,
                        String& error);
 
