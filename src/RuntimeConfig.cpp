@@ -1,0 +1,11 @@
+#include "AppConfig.h"
+
+namespace AppConfig {
+
+bool USE_DHCP = DEFAULT_USE_DHCP;
+IPAddress STATIC_IP = DEFAULT_STATIC_IP;
+IPAddress STATIC_DNS = DEFAULT_STATIC_DNS;
+IPAddress STATIC_GATEWAY = DEFAULT_STATIC_GATEWAY;
+IPAddress STATIC_SUBNET = DEFAULT_STATIC_SUBNET;
+
+} // namespace AppConfig
