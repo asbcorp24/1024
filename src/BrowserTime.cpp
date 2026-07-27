@@ -32,7 +32,7 @@ bool parseSigned16(const String& value, int16_t& result) {
 }
 
 bool validTimeZone(const String& value) {
-    if (value.isEmpty() || value.length() >= sizeof(BrowserTimeContext::timeZone)) return false;
+    if (value.isEmpty() || value.length() >= 64) return false;
     for (size_t i = 0; i < value.length(); ++i) {
         const uint8_t c = static_cast<uint8_t>(value[i]);
         if (c < 0x20 || c == '"' || c == '\\') return false;
