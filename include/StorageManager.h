@@ -16,6 +16,7 @@ public:
     bool saveReference(const String& name,
                        const uint8_t* matrix,
                        uint32_t mappingCrc32,
+                       uint64_t createdAtEpochMs,
                        String& savedFile,
                        String& error);
 
