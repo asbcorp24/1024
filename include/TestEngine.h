@@ -15,9 +15,7 @@ public:
     TestEngine(McpMatrix& matrix, StorageManager& storage);
 
     void begin(bool hardwareReady, const String& hardwareMessage);
-    bool startReferenceCapture(const String& name,
-                               const BrowserTimeContext& browserTime,
-                               String& error);
+    bool startReferenceCapture(const ReferenceCaptureMetadata& metadata, String& error);
     bool startComparison(const String& referenceFile,
                          const BrowserTimeContext& browserTime,
                          String& error);
@@ -38,6 +36,7 @@ private:
     String requestedValue_;
     TestMode requestedMode_ = TestMode::Idle;
     BrowserTimeContext requestedTime_;
+    ReferenceCaptureMetadata requestedReferenceMetadata_;
 
     static void taskEntry(void* parameter);
     void runTask();
@@ -45,6 +44,7 @@ private:
     bool readRowWithRetry(uint8_t* row, String& error);
     void analyze(const uint8_t* reference, const uint8_t* measured, ScanStatistics& statistics);
     String buildReport(const String& referenceFile,
+                       const ReferenceFileHeader* referenceHeader,
                        const String& matrixFile,
                        const uint8_t* reference,
                        const uint8_t* measured,
