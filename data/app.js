@@ -29,6 +29,16 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function browserTimeQuery() {
+  const now = new Date();
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Browser/Local";
+  return new URLSearchParams({
+    epochMs: String(now.getTime()),
+    offsetMinutes: String(-now.getTimezoneOffset()),
+    timeZone
+  }).toString();
+}
+
 function setBusy(value) {
   busy = value;
   $("captureButton").disabled = value;
@@ -39,6 +49,13 @@ function setBusy(value) {
 
 function formatSeconds(ms) {
   return `${(ms / 1000).toFixed(1).replace('.', ',')} с`;
+}
+
+function formatStoredDate(value) {
+  if (!value) return "не указана";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("ru-RU");
 }
 
 function updateStatus(status) {
@@ -180,9 +197,12 @@ async function loadResult(fileName) {
     const result = await api(`/api/result?file=${encodeURIComponent(fileName)}`);
     lastResultLoaded = fileName;
     const summary = result.summary || {};
+    const storedTime = result.time || {};
     $("resultSummary").className = result.passed ? "result-ok" : "result-error";
     $("resultSummary").innerHTML = `
       <strong>${result.passed ? 'КАБЕЛЬ ИСПРАВЕН' : 'ОБНАРУЖЕНЫ ОТЛИЧИЯ'}</strong><br>
+      Дата начала: ${escapeHtml(formatStoredDate(storedTime.startedAtLocal))}<br>
+      Источник времени: ${escapeHtml(storedTime.source || 'не указан')}; часовой пояс: ${escapeHtml(storedTime.timeZone || 'не указан')}<br>
       Эталон: ${escapeHtml(result.reference || 'не указан')}<br>
       Обрывы: ${summary.missingLinks || 0}; паразитные связи: ${summary.extraLinks || 0};
       асимметрии: ${summary.asymmetricLinks || 0}; время: ${formatSeconds(result.elapsedMs || 0)}.
@@ -247,9 +267,10 @@ $("captureButton").addEventListener("click", async () => {
   const name = $("referenceName").value.trim();
   if (!name) return toast("Введите название эталона.");
   try {
-    await api(`/api/reference/capture?name=${encodeURIComponent(name)}`, { method: "POST" });
+    const time = browserTimeQuery();
+    await api(`/api/reference/capture?name=${encodeURIComponent(name)}&${time}`, { method: "POST" });
     setBusy(true);
-    toast("Эталонный замер запущен.");
+    toast("Эталонный замер запущен. Время получено из браузера.");
   } catch (error) { toast(error.message); }
 });
 
@@ -257,9 +278,10 @@ $("testButton").addEventListener("click", async () => {
   const reference = $("referenceSelect").value;
   if (!reference) return toast("Выберите эталон.");
   try {
-    await api(`/api/test/start?reference=${encodeURIComponent(reference)}`, { method: "POST" });
+    const time = browserTimeQuery();
+    await api(`/api/test/start?reference=${encodeURIComponent(reference)}&${time}`, { method: "POST" });
     setBusy(true);
-    toast("Проверка кабеля запущена.");
+    toast("Проверка кабеля запущена. Время получено из браузера.");
   } catch (error) { toast(error.message); }
 });
 
