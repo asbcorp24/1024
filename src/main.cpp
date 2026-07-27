@@ -37,13 +37,13 @@ void setup() {
 
     String networkError;
     if (!web.begin(networkError)) {
-        Serial.println("Ethernet error: " + networkError);
+        Serial.println("Ethernet/web error: " + networkError);
     } else {
-        Serial.println("Web interface: http://" + web.ipAddress() + "/");
+        Serial.println("Async HTTP server started; IP will be reported by ETH event");
     }
 }
 
 void loop() {
-    web.loop();
-    delay(1);
+    // HTTP, SSE, загрузка/выгрузка файлов и измерения выполняются в отдельных задачах.
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
