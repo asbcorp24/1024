@@ -13,6 +13,20 @@ constexpr uint32_t I2C_TIMEOUT_MS = 20;
 constexpr uint8_t TCA9548A_ADDRESS = 0x70;
 constexpr int8_t TCA9548A_RESET_PIN = 4;
 
+// GM009605 / SSD1306 0.96" 128x64 работает на отдельном I2C-контроллере.
+constexpr uint8_t OLED_SDA_PIN = 16;
+constexpr uint8_t OLED_SCL_PIN = 17;
+constexpr uint8_t OLED_I2C_ADDRESS = 0x3C;
+constexpr uint32_t OLED_I2C_CLOCK_HZ = 400000;
+constexpr uint16_t OLED_WIDTH = 128;
+constexpr uint16_t OLED_HEIGHT = 64;
+
+// Механический энкодер с общей точкой GND и внутренними подтяжками ESP32.
+constexpr uint8_t ENCODER_A_PIN = 18;
+constexpr uint8_t ENCODER_B_PIN = 21;
+constexpr uint8_t ENCODER_BUTTON_PIN = 47;
+constexpr uint32_t ENCODER_BUTTON_DEBOUNCE_MS = 35;
+
 constexpr uint8_t W5500_SCK_PIN = 12;
 constexpr uint8_t W5500_MISO_PIN = 13;
 constexpr uint8_t W5500_MOSI_PIN = 11;
@@ -23,12 +37,12 @@ constexpr uint8_t W5500_PHY_ADDRESS = 1;
 
 constexpr const char* HOSTNAME = "cable-tester-1024";
 constexpr const char* DEVICE_MODEL = "KSK-1024";
-constexpr const char* FIRMWARE_VERSION = "2.0.0";
-constexpr bool USE_DHCP = true;
-const IPAddress STATIC_IP(192, 168, 1, 204);
-const IPAddress STATIC_DNS(192, 168, 1, 1);
-const IPAddress STATIC_GATEWAY(192, 168, 1, 1);
-const IPAddress STATIC_SUBNET(255, 255, 255, 0);
+constexpr const char* FIRMWARE_VERSION = "2.1.0";
+constexpr bool DEFAULT_USE_DHCP = true;
+const IPAddress DEFAULT_STATIC_IP(192, 168, 1, 204);
+const IPAddress DEFAULT_STATIC_DNS(192, 168, 1, 1);
+const IPAddress DEFAULT_STATIC_GATEWAY(192, 168, 1, 1);
+const IPAddress DEFAULT_STATIC_SUBNET(255, 255, 255, 0);
 constexpr uint16_t HTTP_PORT = 80;
 
 constexpr size_t DIRECTION_COUNT = 8;
