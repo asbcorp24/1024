@@ -6,9 +6,6 @@
 
 namespace {
 
-portMUX_TYPE timeMux = portMUX_INITIALIZER_UNLOCKED;
-BrowserTimeContext currentTime;
-
 bool parseUnsigned64(const String& value, uint64_t& result) {
     if (value.isEmpty()) return false;
     for (size_t i = 0; i < value.length(); ++i) {
@@ -86,16 +83,17 @@ String formatIso(uint64_t epochMs, int16_t offsetMinutes, bool appendZulu) {
 
 namespace BrowserTime {
 
-bool setFromBrowser(const String& epochMs,
-                    const String& utcOffsetMinutes,
-                    const String& timeZone,
-                    String& error) {
-    BrowserTimeContext next;
-    if (!parseUnsigned64(epochMs, next.startedAtEpochMs) || !next.valid()) {
+bool parseFromBrowser(const String& epochMs,
+                      const String& utcOffsetMinutes,
+                      const String& timeZone,
+                      BrowserTimeContext& context,
+                      String& error) {
+    BrowserTimeContext parsed;
+    if (!parseUnsigned64(epochMs, parsed.startedAtEpochMs) || !parsed.valid()) {
         error = "Браузер передал недопустимую дату и время";
         return false;
     }
-    if (!parseSigned16(utcOffsetMinutes, next.utcOffsetMinutes)) {
+    if (!parseSigned16(utcOffsetMinutes, parsed.utcOffsetMinutes)) {
         error = "Браузер передал недопустимое смещение UTC";
         return false;
     }
@@ -104,19 +102,9 @@ bool setFromBrowser(const String& epochMs,
         return false;
     }
 
-    strlcpy(next.timeZone, timeZone.c_str(), sizeof(next.timeZone));
-    portENTER_CRITICAL(&timeMux);
-    currentTime = next;
-    portEXIT_CRITICAL(&timeMux);
+    strlcpy(parsed.timeZone, timeZone.c_str(), sizeof(parsed.timeZone));
+    context = parsed;
     return true;
-}
-
-BrowserTimeContext snapshot() {
-    BrowserTimeContext copy;
-    portENTER_CRITICAL(&timeMux);
-    copy = currentTime;
-    portEXIT_CRITICAL(&timeMux);
-    return copy;
 }
 
 String formatUtc(uint64_t epochMs) {
