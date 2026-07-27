@@ -1,50 +1,73 @@
 #pragma once
 
 #include <Arduino.h>
-#include <Ethernet.h>
+#include <ESPAsyncWebServer.h>
+#include <ETH.h>
 #include <SPI.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "StorageManager.h"
 #include "TestEngine.h"
-
-// Arduino Ethernet 2.0.2 объявляет begin() без параметров, тогда как
-// ESP32 Server требует чисто виртуальный begin(uint16_t). Адаптер закрывает
-// эту несовместимость, сохраняя порт, переданный конструктору EthernetServer.
-class Esp32EthernetServer : public EthernetServer {
-public:
-    explicit Esp32EthernetServer(uint16_t port) : EthernetServer(port) {}
-
-    void begin(uint16_t port = 0) override {
-        (void)port;
-        EthernetServer::begin();
-    }
-};
 
 class WebApp {
 public:
     WebApp(StorageManager& storage, TestEngine& engine);
 
     bool begin(String& error);
-    void loop();
     String ipAddress() const;
+    bool linkUp() const;
 
 private:
+    enum class UploadKind : uint8_t {
+        Reference,
+        Calculation
+    };
+
+    struct UploadContext {
+        UploadKind kind = UploadKind::Reference;
+        String originalName;
+        String tempPath;
+        String finalPath;
+        String savedFile;
+        String error;
+        size_t received = 0;
+        bool finished = false;
+        bool success = false;
+    };
+
     StorageManager& storage_;
     TestEngine& engine_;
-    Esp32EthernetServer server_;
-    uint32_t lastMaintainMs_ = 0;
+    AsyncWebServer server_;
+    AsyncEventSource events_;
+    TaskHandle_t publisherTaskHandle_ = nullptr;
+    volatile bool ethStarted_ = false;
+    volatile bool ethLinkUp_ = false;
+    volatile bool ethHasIp_ = false;
 
-    void resetW5500();
-    void handleClient(EthernetClient& client);
-    void route(EthernetClient& client, const String& method, const String& target);
+    static WebApp* instance_;
+    static void networkEventThunk(arduino_event_id_t event, arduino_event_info_t info);
+    static void publisherTaskThunk(void* parameter);
 
-    void sendJson(EthernetClient& client, int statusCode, const String& json);
-    void sendText(EthernetClient& client, int statusCode, const String& text);
-    void sendFile(EthernetClient& client, File& file, const String& contentType, bool attachment = false, const String& fileName = "");
-    void sendHeader(EthernetClient& client, int statusCode, const String& contentType, size_t contentLength, const String& extraHeaders = "");
+    void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info);
+    void publisherTask();
+    void configureRoutes();
+    void registerUploadRoute(const char* uri, UploadKind kind);
+    void handleUploadChunk(AsyncWebServerRequest* request,
+                           UploadKind kind,
+                           const String& filename,
+                           size_t index,
+                           uint8_t* data,
+                           size_t len,
+                           bool final);
+    void finishUploadRequest(AsyncWebServerRequest* request);
 
-    static String queryValue(const String& target, const String& key);
-    static String urlDecode(const String& value);
-    static String pathOnly(const String& target);
-    static const char* statusText(int statusCode);
+    void sendDevice(AsyncWebServerRequest* request);
+    void sendDownload(AsyncWebServerRequest* request);
+    void sendJson(AsyncWebServerRequest* request, int statusCode, const String& json);
+    void sendError(AsyncWebServerRequest* request, int statusCode, const String& error);
+    void publishStatus();
+
+    static String parameter(AsyncWebServerRequest* request, const char* name);
+    static String uploadKindName(UploadKind kind);
 };
