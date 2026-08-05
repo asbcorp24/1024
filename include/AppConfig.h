@@ -11,7 +11,7 @@ constexpr uint32_t I2C_CLOCK_HZ = 400000;
 constexpr uint32_t I2C_TIMEOUT_MS = 20;
 
 constexpr uint8_t TCA9548A_ADDRESS = 0x70;
-constexpr int8_t TCA9548A_RESET_PIN = 4;
+constexpr int8_t TCA9548A_RESET_PIN = -1;
 
 // GM009605 / SSD1306 0.96" 128x64 работает на отдельном I2C-контроллере.
 constexpr uint8_t OLED_SDA_PIN = 16;
@@ -21,18 +21,34 @@ constexpr uint32_t OLED_I2C_CLOCK_HZ = 400000;
 constexpr uint16_t OLED_WIDTH = 128;
 constexpr uint16_t OLED_HEIGHT = 64;
 
+constexpr uint8_t RTC_SDA_PIN = 41;
+constexpr uint8_t RTC_SCL_PIN = 42;
+constexpr uint8_t RTC_I2C_ADDRESS = 0x68;
+constexpr uint32_t RTC_I2C_CLOCK_HZ = 100000;
+constexpr bool RTC_ENABLED = true;
+
 // Механический энкодер с общей точкой GND и внутренними подтяжками ESP32.
 constexpr uint8_t ENCODER_A_PIN = 18;
 constexpr uint8_t ENCODER_B_PIN = 21;
 constexpr uint8_t ENCODER_BUTTON_PIN = 47;
 constexpr uint32_t ENCODER_BUTTON_DEBOUNCE_MS = 35;
+constexpr int8_t SERVICE_UNLOCK_PIN = 40;
+constexpr bool SERVICE_UNLOCK_ACTIVE_LOW = true;
+#ifdef RGB_BUILTIN
+constexpr int16_t SERVICE_UNLOCK_LED_PIN = RGB_BUILTIN;
+#elif defined(LED_BUILTIN)
+constexpr int16_t SERVICE_UNLOCK_LED_PIN = LED_BUILTIN;
+#else
+constexpr int16_t SERVICE_UNLOCK_LED_PIN = -1;
+#endif
+constexpr bool SERVICE_UNLOCK_LED_ACTIVE_HIGH = true;
 
 constexpr uint8_t W5500_SCK_PIN = 12;
 constexpr uint8_t W5500_MISO_PIN = 13;
 constexpr uint8_t W5500_MOSI_PIN = 11;
-constexpr uint8_t W5500_CS_PIN = 10;
+constexpr uint8_t W5500_CS_PIN = 5;
 constexpr int8_t W5500_RESET_PIN = 14;
-constexpr uint8_t W5500_INT_PIN = 15;
+constexpr uint8_t W5500_INT_PIN = 4;
 constexpr uint8_t W5500_PHY_ADDRESS = 1;
 
 constexpr const char* HOSTNAME = "cable-tester-1024";
@@ -72,6 +88,12 @@ constexpr const char* RESULT_DIR = "/results";
 constexpr size_t MAX_CALCULATION_JSON_BYTES = 1024U * 1024U;
 
 constexpr uint32_t REFERENCE_MAGIC = 0x31464243UL;
-constexpr uint16_t FILE_FORMAT_VERSION = 2;
+constexpr uint16_t FILE_FORMAT_VERSION = 3;
+constexpr bool UI_ONLY_MODE = false;
+constexpr bool OLED_I2C_SCAN_ON_BOOT = true;
+constexpr uint8_t OLED_I2C_SCAN_FIRST_ADDRESS = 0x08;
+constexpr uint8_t OLED_I2C_SCAN_LAST_ADDRESS = 0x77;
+constexpr bool OLED_DIAGNOSTIC_DISABLE_UPDATES = false;
+constexpr bool HTTP_DEBUG_LOG = true;
 
 } // namespace AppConfig

@@ -82,13 +82,13 @@ bool TestEngine::startReferenceCapture(const ReferenceCaptureMetadata& metadata,
 }
 
 bool TestEngine::startComparison(const String& referenceFile,
-                                 const BrowserTimeContext& browserTime,
+                                 const ComparisonRunMetadata& metadata,
                                  String& error) {
     if (!hardwareReady_) {
         error = "Аппаратная матрица MCP23017 не готова";
         return false;
     }
-    if (!browserTime.valid()) {
+    if (!metadata.valid()) {
         error = "Не переданы корректные дата и время браузера";
         return false;
     }
@@ -106,7 +106,8 @@ bool TestEngine::startComparison(const String& referenceFile,
 
     requestedMode_ = TestMode::Compare;
     requestedValue_ = referenceFile;
-    requestedTime_ = browserTime;
+    requestedTime_ = metadata.time;
+    requestedComparisonMetadata_ = metadata;
     requestedReferenceMetadata_ = ReferenceCaptureMetadata{};
     snapshot_ = EngineSnapshot{};
     snapshot_.mode = requestedMode_;
@@ -121,6 +122,117 @@ bool TestEngine::startComparison(const String& referenceFile,
         error = "Не удалось создать задачу FreeRTOS";
         return false;
     }
+    return true;
+}
+
+bool TestEngine::scanSingleSource(uint16_t sourcePin, String& json, String& error) {
+    if (!hardwareReady_) {
+        error = "Аппаратная матрица MCP23017 не готова";
+        return false;
+    }
+    if (sourcePin >= AppConfig::PIN_COUNT) {
+        error = "Недопустимый номер тестового пина";
+        return false;
+    }
+    if (isBusy()) {
+        error = "Сейчас выполняется другое измерение";
+        return false;
+    }
+
+    auto* baseline = static_cast<uint8_t*>(calloc(AppConfig::ROW_BYTES, 1));
+    auto* row = static_cast<uint8_t*>(calloc(AppConfig::ROW_BYTES, 1));
+    if (baseline == nullptr || row == nullptr) {
+        if (baseline) free(baseline);
+        if (row) free(row);
+        error = "Недостаточно памяти для ручной проверки пина";
+        return false;
+    }
+
+    if (!matrix_.setAllInputs(error)) {
+        free(baseline);
+        free(row);
+        return false;
+    }
+    delay(2);
+
+    if (!readRowWithRetry(baseline, error)) {
+        free(baseline);
+        free(row);
+        return false;
+    }
+
+    if (bitAtRow(baseline, sourcePin)) {
+        free(baseline);
+        free(row);
+        error = "Исходный пин уже в LOW до начала проверки";
+        return false;
+    }
+
+    if (!matrix_.drivePinLow(sourcePin, error)) {
+        free(baseline);
+        free(row);
+        return false;
+    }
+    delayMicroseconds(AppConfig::SOURCE_SETTLE_US);
+
+    if (!readRowWithRetry(row, error)) {
+        String releaseError;
+        matrix_.releasePin(sourcePin, releaseError);
+        free(baseline);
+        free(row);
+        return false;
+    }
+
+    const bool sourceSeenLow = bitAtRow(row, sourcePin);
+    for (size_t i = 0; i < AppConfig::ROW_BYTES; ++i) {
+        row[i] &= static_cast<uint8_t>(~baseline[i]);
+    }
+    clearBitInRow(row, sourcePin);
+
+    String releaseError;
+    if (!matrix_.releasePin(sourcePin, releaseError)) {
+        free(baseline);
+        free(row);
+        error = releaseError;
+        return false;
+    }
+    if (!matrix_.waitPinHigh(sourcePin, AppConfig::RELEASE_TIMEOUT_US, releaseError)) {
+        String resetError;
+        matrix_.setAllInputs(resetError);
+        free(baseline);
+        free(row);
+        error = releaseError;
+        return false;
+    }
+
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["sourcePin"] = sourcePin;
+    doc["sourceName"] = McpMatrix::pinName(sourcePin);
+    doc["sourceSeenLow"] = sourceSeenLow;
+
+    JsonArray connected = doc["connectedPins"].to<JsonArray>();
+    uint16_t connectedCount = 0;
+    for (uint16_t target = 0; target < AppConfig::PIN_COUNT; ++target) {
+        if (!bitAtRow(row, target)) continue;
+        JsonObject item = connected.add<JsonObject>();
+        item["pin"] = target;
+        item["name"] = McpMatrix::pinName(target);
+        ++connectedCount;
+    }
+    doc["connectedCount"] = connectedCount;
+
+    JsonArray stuckLow = doc["baselineLowPins"].to<JsonArray>();
+    for (uint16_t pin = 0; pin < AppConfig::PIN_COUNT; ++pin) {
+        if (!bitAtRow(baseline, pin)) continue;
+        JsonObject item = stuckLow.add<JsonObject>();
+        item["pin"] = pin;
+        item["name"] = McpMatrix::pinName(pin);
+    }
+
+    serializeJson(doc, json);
+    free(baseline);
+    free(row);
     return true;
 }
 
@@ -158,6 +270,7 @@ void TestEngine::runTask() {
     const String requestedValue = requestedValue_;
     const BrowserTimeContext browserTime = requestedTime_;
     const ReferenceCaptureMetadata captureMetadata = requestedReferenceMetadata_;
+    const ComparisonRunMetadata comparisonMetadata = requestedComparisonMetadata_;
     xSemaphoreGive(mutex_);
 
     ReferenceFileHeader referenceHeader{};
@@ -234,7 +347,7 @@ void TestEngine::runTask() {
         } else {
             xSemaphoreTake(mutex_, portMAX_DELAY);
             strlcpy(snapshot_.activeReference, savedReference.c_str(), sizeof(snapshot_.activeReference));
-            strlcpy(snapshot_.message, "Эталон v2 успешно сохранён", sizeof(snapshot_.message));
+            strlcpy(snapshot_.message, "Эталон v3 успешно сохранён", sizeof(snapshot_.message));
             snapshot_.elapsedMs = millis() - startedMs;
             snapshot_.state = TestState::Completed;
             xSemaphoreGive(mutex_);
@@ -244,25 +357,34 @@ void TestEngine::runTask() {
         char baseBuffer[32];
         snprintf(baseBuffer, sizeof(baseBuffer), "result-%06lu", static_cast<unsigned long>(sequence));
         const String baseName(baseBuffer);
-        String matrixFile;
         String reportFile;
 
-        if (!storage_.saveMeasurement(baseName, measured, matrixFile, error)) {
-            setState(TestState::Failed, error);
+        const uint32_t elapsed = millis() - startedMs;
+        const String report = buildReport(requestedValue,
+                                          &referenceHeader,
+                                          reference,
+                                          measured,
+                                          baseline,
+                                          statistics,
+                                          elapsed,
+                                          comparisonMetadata);
+        log_i("TestEngine: result report prepared base=%s jsonSize=%u elapsedMs=%lu",
+              baseName.c_str(),
+              static_cast<unsigned>(report.length()),
+              static_cast<unsigned long>(elapsed));
+        if (report.startsWith("{\"ok\":false")) {
+            log_e("TestEngine: result report build failed base=%s payload=%s",
+                  baseName.c_str(),
+                  report.c_str());
+            setState(TestState::Failed, "Ne udalos sobrat otchet izmereniya");
         } else {
-            const uint32_t elapsed = millis() - startedMs;
-            const String report = buildReport(requestedValue,
-                                              &referenceHeader,
-                                              matrixFile,
-                                              reference,
-                                              measured,
-                                              baseline,
-                                              statistics,
-                                              elapsed,
-                                              browserTime);
             if (!storage_.saveResultReport(baseName, report, reportFile, error)) {
+                log_e("TestEngine: saveResultReport failed base=%s error=%s",
+                      baseName.c_str(),
+                      error.c_str());
                 setState(TestState::Failed, error);
             } else {
+                log_i("TestEngine: saveResultReport ok file=%s", reportFile.c_str());
                 xSemaphoreTake(mutex_, portMAX_DELAY);
                 strlcpy(snapshot_.lastResultFile, reportFile.c_str(), sizeof(snapshot_.lastResultFile));
                 strlcpy(snapshot_.message,
@@ -383,20 +505,27 @@ void TestEngine::analyze(const uint8_t* reference,
 
 String TestEngine::buildReport(const String& referenceFile,
                                const ReferenceFileHeader* referenceHeader,
-                               const String& matrixFile,
                                const uint8_t* reference,
                                const uint8_t* measured,
                                const uint8_t* baseline,
                                const ScanStatistics& statistics,
                                uint32_t elapsedMs,
-                               const BrowserTimeContext& browserTime) {
+                               const ComparisonRunMetadata& metadata) {
+    const BrowserTimeContext& browserTime = metadata.time;
     const uint64_t finishedAtEpochMs = browserTime.startedAtEpochMs + elapsedMs;
+    String packedMeasurement;
+    uint32_t measurementMatrixCrc32 = 0;
+    String packError;
+    if (!storage_.packMatrixToBase64(measured, packedMeasurement, measurementMatrixCrc32, packError)) {
+        return String("{\"ok\":false,\"error\":\"") + jsonEscape(packError) + "\"}";
+    }
+
     String json;
-    json.reserve(70000);
+    json.reserve(110000);
     json += "{\"schema\":2";
     json += ",\"reference\":\"" + jsonEscape(referenceFile) + "\"";
-    json += ",\"matrixFile\":\"" + jsonEscape(matrixFile) + "\"";
-    json += ",\"measurementMatrixCrc32\":" + String(StorageManager::crc32(measured, AppConfig::MATRIX_BYTES));
+    json += ",\"measurementMatrixCrc32\":" + String(measurementMatrixCrc32);
+    json += ",\"measurementMatrixPacked\":\"" + packedMeasurement + "\"";
     json += ",\"elapsedMs\":" + String(elapsedMs);
 
     json += ",\"time\":{";
@@ -430,6 +559,11 @@ String TestEngine::buildReport(const String& referenceFile,
         json += ",\"utcOffsetMinutes\":" + String(referenceHeader->utcOffsetMinutes);
         json += ",\"timeZone\":\"" + jsonEscape(referenceHeader->timeZone) + "\"}";
     }
+
+    json += ",\"measurementMetadata\":{";
+    json += "\"cableType\":\"" + jsonEscape(metadata.cableType) + "\"";
+    json += ",\"deviceId\":\"" + jsonEscape(metadata.deviceId) + "\"";
+    json += ",\"operator\":\"" + jsonEscape(metadata.operatorName) + "\"}";
 
     json += ",\"passed\":";
     json += (statistics.missingLinks == 0 && statistics.extraLinks == 0 &&

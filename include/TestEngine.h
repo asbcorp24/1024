@@ -17,8 +17,9 @@ public:
     void begin(bool hardwareReady, const String& hardwareMessage);
     bool startReferenceCapture(const ReferenceCaptureMetadata& metadata, String& error);
     bool startComparison(const String& referenceFile,
-                         const BrowserTimeContext& browserTime,
+                         const ComparisonRunMetadata& metadata,
                          String& error);
+    bool scanSingleSource(uint16_t sourcePin, String& json, String& error);
     bool isBusy() const;
 
     EngineSnapshot snapshot();
@@ -37,6 +38,7 @@ private:
     TestMode requestedMode_ = TestMode::Idle;
     BrowserTimeContext requestedTime_;
     ReferenceCaptureMetadata requestedReferenceMetadata_;
+    ComparisonRunMetadata requestedComparisonMetadata_;
 
     static void taskEntry(void* parameter);
     void runTask();
@@ -45,13 +47,12 @@ private:
     void analyze(const uint8_t* reference, const uint8_t* measured, ScanStatistics& statistics);
     String buildReport(const String& referenceFile,
                        const ReferenceFileHeader* referenceHeader,
-                       const String& matrixFile,
                        const uint8_t* reference,
                        const uint8_t* measured,
                        const uint8_t* baseline,
                        const ScanStatistics& statistics,
                        uint32_t elapsedMs,
-                       const BrowserTimeContext& browserTime);
+                       const ComparisonRunMetadata& metadata);
 
     void setState(TestState state, const String& message);
     void setProgress(uint16_t currentSource, uint32_t elapsedMs);

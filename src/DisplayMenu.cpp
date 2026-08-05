@@ -1,6 +1,8 @@
 #include "DisplayMenu.h"
 
 #include "AppConfig.h"
+#include "AuxI2cBus.h"
+#include <esp32-hal-log.h>
 
 namespace {
 
@@ -14,8 +16,12 @@ DisplayMenu::DisplayMenu(NetworkSettings& settings, TestEngine& engine, WebApp& 
     : settings_(settings),
       engine_(engine),
       web_(web),
-      oledWire_(1),
-      display_(AppConfig::OLED_WIDTH, AppConfig::OLED_HEIGHT, &oledWire_, -1) {}
+      display_(AppConfig::OLED_WIDTH,
+               AppConfig::OLED_HEIGHT,
+               &Wire1,
+               -1,
+               AppConfig::RTC_I2C_CLOCK_HZ,
+               AppConfig::RTC_I2C_CLOCK_HZ) {}
 
 bool DisplayMenu::begin(String& error) {
     pinMode(AppConfig::ENCODER_A_PIN, INPUT_PULLUP);
@@ -28,24 +34,36 @@ bool DisplayMenu::begin(String& error) {
     buttonStable_ = buttonRaw_;
     buttonChangedAt_ = millis();
 
-    oledWire_.begin(AppConfig::OLED_SDA_PIN,
-                    AppConfig::OLED_SCL_PIN,
-                    AppConfig::OLED_I2C_CLOCK_HZ);
-    if (!display_.begin(SSD1306_SWITCHCAPVCC, AppConfig::OLED_I2C_ADDRESS, true, false)) {
-        error = "GM009605/SSD1306 не отвечает на отдельной I2C-шине";
+    AuxI2cBus::begin();
+    if (AppConfig::OLED_I2C_SCAN_ON_BOOT) scanOledI2cBus();
+    bool displayReady = false;
+    if (AuxI2cBus::lock()) {
+        displayReady = display_.begin(SSD1306_SWITCHCAPVCC, AppConfig::OLED_I2C_ADDRESS, true, false);
+        AuxI2cBus::unlock();
+    }
+    if (!displayReady) {
+        error = "GM009605/SSD1306 ne otvechaet na otdelnoy I2C-shine";
         return false;
     }
 
-    display_.clearDisplay();
-    display_.setTextSize(1);
-    display_.setTextColor(SSD1306_WHITE);
-    display_.setTextWrap(false);
-    display_.setCursor(0, 0);
-    display_.println("KSK-1024 START");
-    display_.println("ASYNC OLED MENU");
-    display_.display();
+    if (!AppConfig::OLED_DIAGNOSTIC_DISABLE_UPDATES) {
+        display_.clearDisplay();
+        display_.setTextSize(1);
+        display_.setTextColor(SSD1306_WHITE);
+        display_.setTextWrap(false);
+        display_.setCursor(0, 0);
+        display_.println("KSK-1024 START");
+        display_.println("ASYNC OLED MENU");
+        if (AuxI2cBus::lock()) {
+            display_.display();
+            AuxI2cBus::unlock();
+        }
+    }
 
     working_ = settings_.snapshot();
+    dirty_ = true;
+    render();
+
     if (xTaskCreatePinnedToCore(taskThunk,
                                 "oled-menu",
                                 6144,
@@ -54,7 +72,7 @@ bool DisplayMenu::begin(String& error) {
                                 &taskHandle_,
                                 1) != pdPASS) {
         taskHandle_ = nullptr;
-        error = "Не удалось создать FreeRTOS-задачу OLED-меню";
+        error = "Ne udalos sozdat FreeRTOS-zadachu OLED-menyu";
         return false;
     }
     return true;
@@ -64,7 +82,29 @@ void DisplayMenu::taskThunk(void* parameter) {
     static_cast<DisplayMenu*>(parameter)->taskLoop();
 }
 
+void DisplayMenu::scanOledI2cBus() {
+    log_i("Wire1 scan started");
+    bool foundAny = false;
+    for (uint8_t address = AppConfig::OLED_I2C_SCAN_FIRST_ADDRESS;
+         address <= AppConfig::OLED_I2C_SCAN_LAST_ADDRESS;
+         ++address) {
+        AuxI2cBus::wire().beginTransmission(address);
+        const uint8_t result = AuxI2cBus::wire().endTransmission();
+        if (result == 0) {
+            foundAny = true;
+            log_i("Wire1 device found at 0x%02X", address);
+        }
+        delay(1);
+    }
+    if (!foundAny) log_w("Wire1 scan: no devices found");
+    log_i("Wire1 scan finished");
+}
+
 void DisplayMenu::taskLoop() {
+    if (AppConfig::OLED_DIAGNOSTIC_DISABLE_UPDATES) {
+        for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
     for (;;) {
         const int8_t step = pollEncoder();
         const bool pressed = pollButtonPressed();
@@ -76,7 +116,10 @@ void DisplayMenu::taskLoop() {
             display_.setTextColor(SSD1306_WHITE);
             display_.setCursor(0, 20);
             display_.println("RESTART...");
-            display_.display();
+            if (AuxI2cBus::lock()) {
+                display_.display();
+                AuxI2cBus::unlock();
+            }
             ESP.restart();
         }
 
@@ -249,7 +292,10 @@ void DisplayMenu::render() {
         case Screen::EditAddress: renderAddressEditor(); break;
         case Screen::Message: renderMessage(); break;
     }
-    display_.display();
+    if (AuxI2cBus::lock()) {
+        display_.display();
+        AuxI2cBus::unlock();
+    }
     lastRenderAt_ = millis();
     dirty_ = false;
 }
@@ -257,12 +303,63 @@ void DisplayMenu::render() {
 void DisplayMenu::renderDashboard() {
     const EngineSnapshot snapshot = engine_.snapshot();
     const NetworkConfig config = settings_.snapshot();
-    printLine(0, "KSK-1024  ASYNC");
-    printLine(10, String("LINK: ") + (web_.linkUp() ? "UP" : "DOWN"));
-    printLine(20, "IP: " + web_.ipAddress());
-    printLine(30, String("MODE: ") + (config.dhcp ? "DHCP" : "STATIC"));
-    printLine(40, String("TEST: ") + stateLabel(snapshot.state));
-    printLine(50, "PROGRESS: " + String(snapshot.progressPercent) + "%");
+
+    if (AppConfig::UI_ONLY_MODE) {
+        printLine(0, "KSK-1024  UI ONLY");
+        printLine(10, web_.currentClockText());
+        printLine(20, String("LINK: ") + (web_.linkUp() ? "UP" : "DOWN"));
+        printLine(30, "IP: " + web_.ipAddress());
+        printLine(40, String("MODE: ") + (config.dhcp ? "DHCP" : "STATIC"));
+        printLine(50, "MATRIX: DISABLED");
+    } else if (snapshot.state == TestState::Scanning) {
+        printLine(0, "TEST IN PROGRESS");
+        printLine(10, web_.currentClockText());
+        printLine(20, "MODE: " + modeLabel(snapshot.mode));
+        printLine(30, String(snapshot.progressPercent) + "%  " +
+                         String(snapshot.currentSource) + "/" + String(snapshot.totalSources));
+        drawProgressBar(0, 42, AppConfig::OLED_WIDTH, 10, snapshot.progressPercent);
+        printLine(54, "ELAP: " + String(snapshot.elapsedMs / 1000.0f, 1) + "S");
+    } else if (snapshot.state == TestState::Preparing ||
+               snapshot.state == TestState::Analyzing ||
+               snapshot.state == TestState::Saving) {
+        printLine(0, "TEST ACTIVE");
+        printLine(10, web_.currentClockText());
+        printLine(20, "MODE: " + modeLabel(snapshot.mode));
+        printLine(30, "STATE: " + String(stateLabel(snapshot.state)));
+        printLine(40, compactFileLabel(snapshot.activeReference));
+        printLine(50, "PROGRESS: " + String(snapshot.progressPercent) + "%");
+    } else if (snapshot.state == TestState::Completed || snapshot.state == TestState::Failed) {
+        const bool passed = snapshot.state == TestState::Completed &&
+                            snapshot.statistics.missingLinks == 0 &&
+                            snapshot.statistics.extraLinks == 0 &&
+                            snapshot.statistics.asymmetricLinks == 0 &&
+                            snapshot.statistics.sourceDriveErrors == 0 &&
+                            snapshot.statistics.i2cErrors == 0;
+        printLine(0, snapshot.state == TestState::Failed ? "TEST ERROR" :
+                  passed ? "RESULT: PASS" : "RESULT: FAIL");
+        printLine(10, web_.currentClockText());
+        if (snapshot.mode == TestMode::Compare) {
+            printLine(20, "MODE: " + modeLabel(snapshot.mode));
+            printLine(30, "MISS:" + String(snapshot.statistics.missingLinks) +
+                             " EXT:" + String(snapshot.statistics.extraLinks));
+            printLine(40, "ASYM:" + String(snapshot.statistics.asymmetricLinks));
+            printLine(50, "DRV:" + String(snapshot.statistics.sourceDriveErrors) +
+                             " I2C:" + String(snapshot.statistics.i2cErrors));
+        } else {
+            printLine(20, "MODE: " + modeLabel(snapshot.mode));
+            printLine(30, "REFERENCE SAVED");
+            printLine(40, "LOW:" + String(snapshot.statistics.stuckLowPins) +
+                             " DRV:" + String(snapshot.statistics.sourceDriveErrors));
+            printLine(50, "I2C:" + String(snapshot.statistics.i2cErrors));
+        }
+    } else {
+        printLine(0, "KSK-1024  ASYNC");
+        printLine(10, web_.currentClockText());
+        printLine(20, String("LINK: ") + (web_.linkUp() ? "UP" : "DOWN"));
+        printLine(30, "IP: " + web_.ipAddress());
+        printLine(40, String("MODE: ") + (config.dhcp ? "DHCP" : "STATIC"));
+        printLine(50, "PRESS: MENU");
+    }
     display_.drawFastHLine(0, 62, AppConfig::OLED_WIDTH, SSD1306_WHITE);
 }
 
@@ -271,7 +368,7 @@ void DisplayMenu::renderMenu() {
         "DHCP", "IP", "MASK", "GATEWAY", "DNS", "SAVE+REBOOT", "CANCEL"
     };
 
-    printLine(0, "NETWORK MENU");
+    printLine(0, "MENU  PRESS=OK");
     const uint8_t first = selectedItem_ > 2 ? selectedItem_ - 2 : 0;
     for (uint8_t row = 0; row < 6; ++row) {
         const uint8_t item = first + row;
@@ -298,7 +395,7 @@ void DisplayMenu::renderAddressEditor() {
     }
     printLine(28, octets);
     printLine(42, "OCTET " + String(editOctet_ + 1) + " / 4");
-    printLine(54, "ROTATE, PRESS NEXT");
+    printLine(54, "PRESS: NEXT");
 }
 
 void DisplayMenu::renderMessage() {
@@ -321,6 +418,19 @@ void DisplayMenu::printLine(int16_t y, const String& text, bool selected) {
     display_.setTextColor(SSD1306_WHITE);
 }
 
+void DisplayMenu::drawProgressBar(int16_t x,
+                                  int16_t y,
+                                  int16_t width,
+                                  int16_t height,
+                                  uint8_t percent) {
+    const int16_t clampedWidth = width > 2 ? width - 2 : 0;
+    const int16_t fillWidth = static_cast<int16_t>((static_cast<uint32_t>(clampedWidth) * percent) / 100U);
+    display_.drawRect(x, y, width, height, SSD1306_WHITE);
+    if (fillWidth > 0) {
+        display_.fillRect(x + 1, y + 1, fillWidth, height - 2, SSD1306_WHITE);
+    }
+}
+
 const char* DisplayMenu::stateLabel(TestState state) {
     switch (state) {
         case TestState::Preparing: return "PREPARE";
@@ -340,4 +450,19 @@ String DisplayMenu::addressLabel(AddressField field) {
         case AddressField::Dns: return "DNS";
         default: return "IP";
     }
+}
+
+String DisplayMenu::modeLabel(TestMode mode) {
+    switch (mode) {
+        case TestMode::CaptureReference: return "REFERENCE";
+        case TestMode::Compare: return "COMPARE";
+        default: return "IDLE";
+    }
+}
+
+String DisplayMenu::compactFileLabel(const char* value, size_t keep) {
+    String text = value == nullptr ? "" : String(value);
+    if (text.isEmpty()) return "NO ACTIVE FILE";
+    if (text.length() <= keep) return text;
+    return text.substring(0, keep);
 }

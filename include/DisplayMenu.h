@@ -23,7 +23,6 @@ private:
     NetworkSettings& settings_;
     TestEngine& engine_;
     WebApp& web_;
-    TwoWire oledWire_;
     Adafruit_SSD1306 display_;
     TaskHandle_t taskHandle_ = nullptr;
 
@@ -57,7 +56,11 @@ private:
     void renderAddressEditor();
     void renderMessage();
     void printLine(int16_t y, const String& text, bool selected = false);
+    void drawProgressBar(int16_t x, int16_t y, int16_t width, int16_t height, uint8_t percent);
+    void scanOledI2cBus();
 
     static const char* stateLabel(TestState state);
     static String addressLabel(AddressField field);
+    static String modeLabel(TestMode mode);
+    static String compactFileLabel(const char* value, size_t keep = 14);
 };

@@ -12,7 +12,7 @@
       <h1>Контроль кабельных сборок</h1>
       <p>ESP32-S3 · 64 MCP23017 · 1024 линии · асинхронный W5500</p>
     </div>
-    <div id="deviceBadge" class="badge neutral">Подключение…</div>
+    <div id="deviceBadge" class="badge neutral">Подключение...</div>
   </header>
 
   <main class="layout">
@@ -26,7 +26,7 @@
         <span id="progressText">0 / 1024</span>
         <span id="elapsedText">0,0 с</span>
       </div>
-      <p id="statusMessage" class="message">Загрузка состояния…</p>
+      <p id="statusMessage" class="message">Загрузка состояния...</p>
 
       <div class="stats-grid">
         <div><b id="expectedLinks">0</b><span>связей в эталоне</span></div>
@@ -39,60 +39,95 @@
     </section>
 
     <section class="card wide">
-      <h2>Создать эталон v2</h2>
-      <p>Метаданные и матрица сохраняются в одном файле <code>.ref</code>. Дата и часовой пояс берутся из браузера автоматически.</p>
-      <div class="form-grid">
-        <label>
-          Название эталона
-          <input id="referenceName" type="text" maxlength="63" placeholder="Например: КС-17 ревизия 3" required>
-        </label>
-        <label>
-          Тип кабельной сборки
-          <input id="cableType" type="text" maxlength="63" placeholder="Например: КС-17" required>
-        </label>
-        <label>
-          Ревизия
-          <input id="revision" type="text" maxlength="31" placeholder="Например: 03" required>
-        </label>
-        <label>
-          Прибор, на котором создан эталон
-          <input id="deviceId" type="text" maxlength="63" placeholder="Например: КСК-1024 №0001" required>
-        </label>
-        <label>
-          Оператор
-          <input id="operatorName" type="text" maxlength="95" placeholder="ФИО или табельный номер" required>
-        </label>
-        <label>
-          CRC32 таблицы соединений
-          <input id="mappingCrc32" type="text" maxlength="10" placeholder="Например: A4C18B39" pattern="(?:0[xX])?[0-9A-Fa-f]{1,8}">
-          <small>Оставьте пустым, пока таблица соединений не загружена.</small>
-        </label>
-        <label>
-          Статус утверждения
-          <select id="approvalStatus">
-            <option value="draft">Черновик</option>
-            <option value="pending">На утверждении</option>
-            <option value="approved">Утверждён</option>
-            <option value="rejected">Отклонён</option>
-            <option value="archived">Архивный</option>
-          </select>
-        </label>
-        <label class="span-two">
-          Комментарий
-          <textarea id="referenceComment" maxlength="255" rows="3" placeholder="Основание создания, особенности кабеля, номер документа"></textarea>
-        </label>
+      <div class="card-head">
+        <div>
+          <h2>Создать эталон v3</h2>
+          <p>Метаданные и матрица сохраняются в одном файле <code>.ref</code>. Дата и часовой пояс берутся из браузера автоматически.</p>
+        </div>
+        <button id="toggleReferenceFormButton" class="secondary" type="button" aria-expanded="false" aria-controls="referenceFormPanel">Открыть</button>
       </div>
-      <button id="captureButton" class="primary">Запустить эталонный замер</button>
+      <div id="referenceFormPanel" class="collapsible-panel" hidden>
+        <div class="form-grid">
+          <label>
+            Название эталона
+            <input id="referenceName" type="text" maxlength="63" placeholder="Например: КС-17 ревизия 3" required>
+          </label>
+          <label>
+            Тип кабельной сборки
+            <input id="cableType" type="text" maxlength="63" placeholder="Например: КС-17" required>
+          </label>
+          <label>
+            Ревизия
+            <input id="revision" type="text" maxlength="31" placeholder="Например: 03" required>
+          </label>
+          <label>
+            Прибор, на котором создан эталон
+            <input id="deviceId" type="text" maxlength="63" placeholder="Например: КСК-1024 №0001" list="deviceSuggestions" autocomplete="off" required>
+          </label>
+          <label>
+            Оператор
+            <input id="operatorName" type="text" maxlength="95" placeholder="ФИО или табельный номер" list="operatorSuggestions" autocomplete="off" required>
+          </label>
+          <label>
+            CRC32 таблицы соединений
+            <input id="mappingCrc32" type="text" maxlength="10" placeholder="Например: A4C18B39" pattern="(?:0[xX])?[0-9A-Fa-f]{1,8}">
+            <small>Оставьте пустым, пока таблица соединений не загружена.</small>
+          </label>
+          <label>
+            Статус утверждения
+            <select id="approvalStatus">
+              <option value="draft">Черновик</option>
+              <option value="pending">На утверждении</option>
+              <option value="approved">Утверждён</option>
+              <option value="rejected">Отклонён</option>
+              <option value="archived">Архивный</option>
+            </select>
+          </label>
+          <label class="span-two">
+            Комментарий
+            <textarea id="referenceComment" maxlength="255" rows="3" placeholder="Основание создания, особенности кабеля, номер документа"></textarea>
+          </label>
+        </div>
+        <button id="captureButton" class="primary">Запустить эталонный замер</button>
+      </div>
     </section>
 
     <section class="card wide">
       <h2>Проверить кабель</h2>
-      <p>Выберите сохранённый или загруженный эталон v2 и запустите полное сравнение.</p>
+      <p>Выберите сохранённый или загруженный эталон v3 и запустите полное сравнение.</p>
       <label>
         Эталон
         <select id="referenceSelect"></select>
       </label>
+      <div class="form-grid">
+        <label>
+          Тип сборки расчёта
+          <input id="testCableType" type="text" maxlength="63" placeholder="Например: КС-17" required>
+        </label>
+        <label>
+          Прибор проверки
+          <input id="testDeviceId" type="text" maxlength="63" placeholder="Например: КСК-1024 №0001" list="deviceSuggestions" autocomplete="off" required>
+        </label>
+        <label>
+          Оператор проверки
+          <input id="testOperatorName" type="text" maxlength="95" placeholder="ФИО или табельный номер" list="operatorSuggestions" autocomplete="off" required>
+        </label>
+      </div>
       <button id="testButton" class="primary">Запустить проверку</button>
+    </section>
+
+    <datalist id="deviceSuggestions"></datalist>
+    <datalist id="operatorSuggestions"></datalist>
+
+    <section class="card wide">
+      <div class="card-head">
+        <div>
+          <h2>Настройка даты и времени</h2>
+          <p>Синхронизация времени ESP32 с текущим временем браузера. После подключения DS3231 этот же механизм можно использовать для записи времени в RTC.</p>
+        </div>
+        <button id="syncTimeButton" class="secondary">Синхронизировать с браузером</button>
+      </div>
+      <div id="timeSyncStatus" class="message">Время на плате ещё не синхронизировано.</div>
     </section>
 
     <section class="card wide">
@@ -101,23 +136,26 @@
           <h2>Загрузка файлов в устройство</h2>
           <p>Файлы передаются потоково, без блокировки веб-интерфейса.</p>
         </div>
+        <button id="toggleUploadPanelButton" class="secondary" type="button" aria-expanded="false" aria-controls="uploadPanel">Открыть</button>
       </div>
-      <div class="upload-grid">
-        <div class="upload-box">
-          <h3>Загрузить эталон</h3>
-          <p>Принимается только формат <code>.ref v2</code>. Проверяются заголовок, метаданные, размер и CRC32 матрицы.</p>
-          <input id="referenceUploadInput" type="file" accept=".ref,application/octet-stream">
-          <button id="referenceUploadButton" class="secondary">Загрузить эталон</button>
-          <div class="upload-progress"><div id="referenceUploadBar"></div></div>
-          <small id="referenceUploadText">Файл не выбран</small>
-        </div>
-        <div class="upload-box">
-          <h3>Загрузить расчёт</h3>
-          <p>Допускаются JSON-отчёты <code>.json</code> и бинарные матрицы <code>.bin</code>.</p>
-          <input id="calculationUploadInput" type="file" accept=".json,.bin,application/json,application/octet-stream">
-          <button id="calculationUploadButton" class="secondary">Загрузить расчёт</button>
-          <div class="upload-progress"><div id="calculationUploadBar"></div></div>
-          <small id="calculationUploadText">Файл не выбран</small>
+      <div id="uploadPanel" class="collapsible-panel" hidden>
+        <div class="upload-grid">
+          <div class="upload-box">
+            <h3>Загрузить эталон</h3>
+            <p>Принимается только формат <code>.ref v3</code>. Эталон, матрица и расчёты хранятся в сжатом виде.</p>
+            <input id="referenceUploadInput" type="file" accept=".ref,application/octet-stream">
+            <button id="referenceUploadButton" class="secondary">Загрузить эталон</button>
+            <div class="upload-progress"><div id="referenceUploadBar"></div></div>
+            <small id="referenceUploadText">Файл не выбран</small>
+          </div>
+          <div class="upload-box">
+            <h3>Загрузить расчёт</h3>
+            <p>Допускаются JSON-отчёты <code>.json</code>.</p>
+            <input id="calculationUploadInput" type="file" accept=".json,application/json,application/octet-stream">
+            <button id="calculationUploadButton" class="secondary">Загрузить расчёт</button>
+            <div class="upload-progress"><div id="calculationUploadBar"></div></div>
+            <small id="calculationUploadText">Файл не выбран</small>
+          </div>
         </div>
       </div>
     </section>
@@ -140,8 +178,53 @@
 
     <section class="card wide">
       <div class="card-head">
+        <div>
+          <h2 id="matrixTitle">Матрица связей 64×64</h2>
+          <p id="matrixSubtitle">Выберите эталон или откройте результат, чтобы увидеть цветовую карту связей по всем 64 модулям.</p>
+        </div>
+      </div>
+      <div id="matrixLegend" class="matrix-legend"></div>
+      <div id="matrixLegendNote" class="matrix-note"></div>
+      <div class="matrix-layout">
+        <div>
+          <div class="matrix-axis-top" id="matrixAxisTop"></div>
+          <div class="matrix-board">
+            <div class="matrix-axis-left" id="matrixAxisLeft"></div>
+            <div class="matrix-wrap">
+              <canvas id="matrixCanvas" width="512" height="512"></canvas>
+            </div>
+          </div>
+        </div>
+        <aside class="matrix-side">
+          <div id="matrixMeta" class="message">Сводка по матрице появится после открытия эталона или результата.</div>
+          <div id="matrixConnections" class="empty">Список связей пока пуст.</div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="card wide">
+      <div class="card-head">
         <h2>Хранилище</h2>
         <button id="refreshFilesButton" class="secondary">Обновить</button>
+      </div>
+      <div id="storageStatus" class="storage-box">Загрузка состояния хранилища...</div>
+      <div class="form-grid">
+        <label>
+          Дата от
+          <input id="calculationFilterDateFrom" type="date">
+        </label>
+        <label>
+          Дата до
+          <input id="calculationFilterDateTo" type="date">
+        </label>
+        <label>
+          Прибор
+          <input id="calculationFilterDeviceId" type="text" maxlength="63" placeholder="Например: КСК-1024 №0001">
+        </label>
+        <label>
+          Проверяющий
+          <input id="calculationFilterOperator" type="text" maxlength="95" placeholder="ФИО или табельный номер">
+        </label>
       </div>
       <div class="files-columns">
         <div>
@@ -153,9 +236,48 @@
           <div id="calculationFiles" class="file-list"></div>
         </div>
       </div>
+      <div class="journal-block">
+        <div class="card-head">
+          <h3>Журнал проверок</h3>
+          <div id="journalSummary" class="badge neutral">0 записей</div>
+        </div>
+        <div class="journal-toolbar">
+          <label class="journal-sort">
+            <span>Сортировка</span>
+            <select id="journalSort">
+              <option value="date_desc">Дата: сначала новые</option>
+              <option value="date_asc">Дата: сначала старые</option>
+              <option value="result_bad_first">Итог: сначала ошибки</option>
+              <option value="result_ok_first">Итог: сначала норма</option>
+            </select>
+          </label>
+          <div id="journalPagination" class="journal-pagination" hidden></div>
+        </div>
+        <div id="journalTable" class="empty">Записей пока нет.</div>
+      </div>
+    </section>
+
+    <section class="card wide">
+      <h2>Ручная проверка пина</h2>
+      <p>Введите номер пина <code>0..1023</code>. Проверка опустит его в <code>LOW</code> и покажет, какие каналы из всех <code>1024</code> действительно с ним связаны.</p>
+      <div class="form-grid">
+        <label>
+          Source pin
+          <input id="diagnosticSourcePin" type="number" min="0" max="1023" step="1" value="0">
+        </label>
+      </div>
+      <button id="diagnosticScanButton" class="secondary">Проверить pin -> 1024</button>
+      <div id="diagnosticResult" class="empty">Режим ожидает запуска.</div>
     </section>
   </main>
 
+  <div id="busyOverlay" class="busy-overlay" hidden>
+    <div class="busy-overlay-card">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <div id="busyOverlayTitle" class="busy-overlay-title">Идет тестирование</div>
+      <div id="busyOverlayText" class="busy-overlay-text">Подождите, идет обработка.</div>
+    </div>
+  </div>
   <div id="toast" class="toast" hidden></div>
   <script src="/app.js"></script>
 </body>

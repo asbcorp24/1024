@@ -39,6 +39,20 @@ struct ReferenceCaptureMetadata {
     }
 };
 
+struct ComparisonRunMetadata {
+    BrowserTimeContext time;
+    char cableType[64] = {};
+    char deviceId[64] = {};
+    char operatorName[96] = {};
+
+    bool valid() const {
+        return time.valid() &&
+               cableType[0] != '\0' &&
+               deviceId[0] != '\0' &&
+               operatorName[0] != '\0';
+    }
+};
+
 struct __attribute__((packed)) ReferenceFileHeader {
     uint32_t magic;
     uint16_t version;

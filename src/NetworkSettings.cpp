@@ -8,6 +8,11 @@ bool nonZeroAddress(const IPAddress& address) {
     return address[0] != 0 || address[1] != 0 || address[2] != 0 || address[3] != 0;
 }
 
+String readStoredIp(Preferences& preferences, const char* key, const IPAddress& fallback) {
+    if (!preferences.isKey(key)) return NetworkSettings::ipToString(fallback);
+    return preferences.getString(key, NetworkSettings::ipToString(fallback));
+}
+
 } // namespace
 
 bool NetworkSettings::begin(String& error) {
@@ -28,16 +33,16 @@ bool NetworkSettings::begin(String& error) {
     loaded.dhcp = preferences_.getBool("dhcp", AppConfig::DEFAULT_USE_DHCP);
 
     IPAddress parsed;
-    if (parseStoredIp(preferences_.getString("ip", NetworkSettings::ipToString(AppConfig::DEFAULT_STATIC_IP)), parsed)) {
+    if (parseStoredIp(readStoredIp(preferences_, "ip", AppConfig::DEFAULT_STATIC_IP), parsed)) {
         loaded.ip = parsed;
     }
-    if (parseStoredIp(preferences_.getString("gateway", NetworkSettings::ipToString(AppConfig::DEFAULT_STATIC_GATEWAY)), parsed)) {
+    if (parseStoredIp(readStoredIp(preferences_, "gateway", AppConfig::DEFAULT_STATIC_GATEWAY), parsed)) {
         loaded.gateway = parsed;
     }
-    if (parseStoredIp(preferences_.getString("subnet", NetworkSettings::ipToString(AppConfig::DEFAULT_STATIC_SUBNET)), parsed)) {
+    if (parseStoredIp(readStoredIp(preferences_, "subnet", AppConfig::DEFAULT_STATIC_SUBNET), parsed)) {
         loaded.subnet = parsed;
     }
-    if (parseStoredIp(preferences_.getString("dns", NetworkSettings::ipToString(AppConfig::DEFAULT_STATIC_DNS)), parsed)) {
+    if (parseStoredIp(readStoredIp(preferences_, "dns", AppConfig::DEFAULT_STATIC_DNS), parsed)) {
         loaded.dns = parsed;
     }
 

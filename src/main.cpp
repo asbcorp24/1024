@@ -4,6 +4,7 @@
 #include "DisplayMenu.h"
 #include "McpMatrix.h"
 #include "NetworkSettings.h"
+#include "RtcClock.h"
 #include "StorageManager.h"
 #include "TestEngine.h"
 #include "WebApp.h"
@@ -12,7 +13,8 @@ StorageManager storage;
 McpMatrix matrix;
 TestEngine engine(matrix, storage);
 NetworkSettings networkSettings;
-WebApp web(storage, engine);
+RtcClock rtc;
+WebApp web(storage, engine, rtc);
 DisplayMenu displayMenu(networkSettings, engine, web);
 
 void setup() {
@@ -20,7 +22,6 @@ void setup() {
     delay(500);
     Serial.println();
     Serial.println("1024 Cable Assembly Tester / ESP32-S3 N16R8");
-
     String networkSettingsError;
     const bool networkSettingsReady = networkSettings.begin(networkSettingsError);
     if (!networkSettingsReady) {
@@ -51,15 +52,35 @@ void setup() {
     }
 
     String matrixError;
-    const bool matrixReady = matrix.begin(matrixError);
-    if (!matrixReady) {
-        Serial.println("MCP matrix error: " + matrixError);
+    bool matrixReady = false;
+    if (AppConfig::UI_ONLY_MODE) {
+        matrixError = "UI-only mode: TCA9548A/MCP23017 disabled";
+        Serial.println(matrixError);
+        log_w("BOOT: matrix disabled by UI_ONLY_MODE");
     } else {
-        Serial.println("64 MCP23017 initialized");
+        matrixReady = matrix.begin(matrixError);
+        if (!matrixReady) {
+            Serial.println("MCP matrix error: " + matrixError);
+            log_e("BOOT: McpMatrix.begin failed: %s", matrixError.c_str());
+        } else {
+            Serial.println("64 MCP23017 initialized");
+            log_i("BOOT: McpMatrix.begin ok");
+        }
     }
 
-    const bool hardwareReady = storageReady && matrixReady;
-    engine.begin(hardwareReady, storageReady ? matrixError : storageError);
+    const bool hardwareReady = storageReady && (AppConfig::UI_ONLY_MODE || matrixReady);
+    engine.begin(hardwareReady,
+                 storageReady
+                     ? (AppConfig::UI_ONLY_MODE ? String("UI-only mode: matrix disabled") : matrixError)
+                     : storageError);
+    log_i("BOOT: TestEngine.begin hardwareReady=%s", hardwareReady ? "true" : "false");
+
+    String rtcError;
+    if (!rtc.begin(rtcError)) {
+        Serial.println("RTC warning: " + rtcError);
+    } else {
+        Serial.println("DS3231 ready on software I2C");
+    }
 
     String networkError;
     if (!web.begin(networkError)) {

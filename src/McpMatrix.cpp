@@ -12,11 +12,12 @@ bool McpMatrix::begin(String& error) {
     Wire.setClock(AppConfig::I2C_CLOCK_HZ);
     Wire.setTimeOut(AppConfig::I2C_TIMEOUT_MS);
 
-    if (!resetMultiplexer(error)) {
+    if (!probe(AppConfig::TCA9548A_ADDRESS)) {
+        error = "PCA/TCA9548A not found at 0x70 on SDA=" +
+                String(AppConfig::I2C_SDA_PIN) + " SCL=" + String(AppConfig::I2C_SCL_PIN);
         return false;
     }
-    if (!probe(AppConfig::TCA9548A_ADDRESS)) {
-        error = "TCA9548A не отвечает по адресу 0x70";
+    if (!resetMultiplexer(error)) {
         return false;
     }
     return initializeAll(error);
@@ -37,7 +38,7 @@ bool McpMatrix::disableAllDirections(String& error) {
     Wire.beginTransmission(AppConfig::TCA9548A_ADDRESS);
     Wire.write(0x00);
     if (Wire.endTransmission() != 0) {
-        error = "Не удалось отключить каналы TCA9548A";
+        error = "Failed to write 0x00 to PCA/TCA9548A at 0x70";
         return false;
     }
     selectedDirection_ = -1;
@@ -46,7 +47,7 @@ bool McpMatrix::disableAllDirections(String& error) {
 
 bool McpMatrix::selectDirection(uint8_t direction, String& error) {
     if (direction >= AppConfig::DIRECTION_COUNT) {
-        error = "Недопустимое направление I2C";
+        error = "Invalid I2C direction";
         return false;
     }
     if (selectedDirection_ == static_cast<int8_t>(direction)) {
@@ -56,7 +57,7 @@ bool McpMatrix::selectDirection(uint8_t direction, String& error) {
     Wire.beginTransmission(AppConfig::TCA9548A_ADDRESS);
     Wire.write(static_cast<uint8_t>(1U << direction));
     if (Wire.endTransmission() != 0) {
-        error = "Ошибка переключения TCA9548A на направление " + String(direction);
+        error = "Failed to switch PCA/TCA9548A to channel " + String(direction);
         selectedDirection_ = -1;
         return false;
     }
@@ -111,8 +112,8 @@ bool McpMatrix::initializeAll(String& error) {
         for (uint8_t module = 0; module < AppConfig::MODULES_PER_DIRECTION; ++module) {
             const uint8_t address = static_cast<uint8_t>(0x20 + module);
             if (!probe(address)) {
-                error = "MCP23017 не отвечает: направление " + String(direction) +
-                        ", модуль " + String(module) + ", адрес 0x" + String(address, HEX);
+                error = "MCP23017 not responding: direction " + String(direction) +
+                        ", module " + String(module) + ", address 0x" + String(address, HEX);
                 return false;
             }
 
@@ -122,8 +123,8 @@ bool McpMatrix::initializeAll(String& error) {
                 !writeRegister16(address, REG_OLATA, 0x0000) ||
                 !writeRegister16(address, REG_IODIRA, 0xFFFF) ||
                 !writeRegister16(address, REG_GPPUA, 0xFFFF)) {
-                error = "Ошибка настройки MCP23017: направление " + String(direction) +
-                        ", модуль " + String(module);
+                error = "MCP23017 init failed: direction " + String(direction) +
+                        ", module " + String(module);
                 return false;
             }
         }
@@ -140,7 +141,7 @@ bool McpMatrix::setAllInputs(String& error) {
             const uint8_t address = static_cast<uint8_t>(0x20 + module);
             if (!writeRegister16(address, REG_IODIRA, 0xFFFF) ||
                 !writeRegister16(address, REG_GPPUA, 0xFFFF)) {
-                error = "Не удалось перевести все линии во вход: D" + String(direction) +
+                error = "Failed to return all lines to input: D" + String(direction) +
                         " M" + String(module);
                 return false;
             }
@@ -151,7 +152,7 @@ bool McpMatrix::setAllInputs(String& error) {
 
 bool McpMatrix::readAllLowMask(uint8_t* row, String& error) {
     if (row == nullptr) {
-        error = "Нулевой буфер строки матрицы";
+        error = "Null matrix row buffer";
         return false;
     }
     memset(row, 0, AppConfig::ROW_BYTES);
@@ -164,7 +165,7 @@ bool McpMatrix::readAllLowMask(uint8_t* row, String& error) {
             const uint8_t address = static_cast<uint8_t>(0x20 + module);
             uint16_t gpio = 0;
             if (!readRegister16(address, REG_GPIOA, gpio)) {
-                error = "Ошибка чтения GPIOA/GPIOB: D" + String(direction) +
+                error = "GPIOA/GPIOB read failed: D" + String(direction) +
                         " M" + String(module);
                 return false;
             }
@@ -180,7 +181,7 @@ bool McpMatrix::readAllLowMask(uint8_t* row, String& error) {
 
 bool McpMatrix::drivePinLow(uint16_t globalPin, String& error) {
     if (globalPin >= AppConfig::PIN_COUNT) {
-        error = "Недопустимый номер тестового пина";
+        error = "Invalid source pin number";
         return false;
     }
 
@@ -197,7 +198,7 @@ bool McpMatrix::drivePinLow(uint16_t globalPin, String& error) {
     const uint8_t directionMask = static_cast<uint8_t>(0xFFU & ~(1U << bit));
 
     if (!writeRegister8(address, directionRegister, directionMask)) {
-        error = "Не удалось установить OUTPUT LOW для " + pinName(globalPin);
+        error = "Failed to set OUTPUT LOW for " + pinName(globalPin);
         return false;
     }
     return true;
@@ -205,7 +206,7 @@ bool McpMatrix::drivePinLow(uint16_t globalPin, String& error) {
 
 bool McpMatrix::releasePin(uint16_t globalPin, String& error) {
     if (globalPin >= AppConfig::PIN_COUNT) {
-        error = "Недопустимый номер освобождаемого пина";
+        error = "Invalid pin number to release";
         return false;
     }
 
@@ -219,7 +220,7 @@ bool McpMatrix::releasePin(uint16_t globalPin, String& error) {
     const uint8_t address = static_cast<uint8_t>(0x20 + module);
     const uint8_t directionRegister = pin < 8 ? REG_IODIRA : REG_IODIRB;
     if (!writeRegister8(address, directionRegister, 0xFF)) {
-        error = "Не удалось вернуть во вход " + pinName(globalPin);
+        error = "Failed to return pin to input " + pinName(globalPin);
         return false;
     }
     return true;
@@ -227,7 +228,7 @@ bool McpMatrix::releasePin(uint16_t globalPin, String& error) {
 
 bool McpMatrix::readPin(uint16_t globalPin, bool& high, String& error) {
     if (globalPin >= AppConfig::PIN_COUNT) {
-        error = "Недопустимый номер читаемого пина";
+        error = "Invalid pin number to read";
         return false;
     }
 
@@ -240,7 +241,7 @@ bool McpMatrix::readPin(uint16_t globalPin, bool& high, String& error) {
 
     uint16_t gpio = 0;
     if (!readRegister16(static_cast<uint8_t>(0x20 + module), REG_GPIOA, gpio)) {
-        error = "Ошибка контрольного чтения " + pinName(globalPin);
+        error = "Readback failed for " + pinName(globalPin);
         return false;
     }
     high = (gpio & (1U << pin)) != 0;
@@ -259,28 +260,27 @@ bool McpMatrix::waitPinHigh(uint16_t globalPin, uint32_t timeoutUs, String& erro
         }
         delayMicroseconds(20);
     }
-    error = "Линия не восстановилась после отпускания: " + pinName(globalPin);
+    error = "Pin did not return HIGH: " + pinName(globalPin);
     return false;
 }
 
 uint8_t McpMatrix::directionOf(uint16_t globalPin) {
-    return static_cast<uint8_t>((globalPin >> 7) & 0x07);
+    return static_cast<uint8_t>((globalPin / AppConfig::PINS_PER_MODULE) / AppConfig::MODULES_PER_DIRECTION);
 }
 
 uint8_t McpMatrix::moduleOf(uint16_t globalPin) {
-    return static_cast<uint8_t>((globalPin >> 4) & 0x07);
+    return static_cast<uint8_t>((globalPin / AppConfig::PINS_PER_MODULE) % AppConfig::MODULES_PER_DIRECTION);
 }
 
 uint8_t McpMatrix::pinOf(uint16_t globalPin) {
-    return static_cast<uint8_t>(globalPin & 0x0F);
+    return static_cast<uint8_t>(globalPin % AppConfig::PINS_PER_MODULE);
 }
 
 String McpMatrix::pinName(uint16_t globalPin) {
+    const uint8_t direction = directionOf(globalPin);
+    const uint8_t module = moduleOf(globalPin);
     const uint8_t pin = pinOf(globalPin);
-    String result = "D" + String(directionOf(globalPin));
-    result += "-M" + String(moduleOf(globalPin));
-    result += pin < 8 ? "-GPA" : "-GPB";
-    result += String(pin & 0x07);
-    result += " (#" + String(globalPin) + ")";
-    return result;
+    return "D" + String(direction) + "-M" + String(module) +
+           "-GP" + (pin < 8 ? "A" : "B") + String(pin & 0x07) +
+           " (#" + String(globalPin) + ")";
 }
