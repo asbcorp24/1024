@@ -253,7 +253,9 @@ function csvEscape(value) {
 }
 
 function downloadTextFile(fileName, content, mimeType) {
-  const blob = new Blob([content], { type: mimeType });
+  const normalizedType = String(mimeType || "");
+  const payload = normalizedType.includes("charset=utf-8") ? `\uFEFF${content}` : content;
+  const blob = new Blob([payload], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -1309,6 +1311,60 @@ function exportReferencesCsv() {
   downloadTextFile("references-journal.csv", rows.map((row) => row.map(csvEscape).join(";")).join("\n"), "text/csv;charset=utf-8");
 }
 
+async function exportCalculationReportCsv(fileName) {
+  try {
+    const result = await api(`/api/result?file=${encodeURIComponent(fileName)}`);
+    const summary = result.summary || {};
+    const time = result.time || {};
+    const reference = result.referenceMetadata || {};
+    const measurement = result.measurementMetadata || {};
+    const rows = [
+      ["Раздел", "Поле", "Значение"],
+      ["Отчет", "Файл", fileName],
+      ["Отчет", "Итог", result.passed ? "Норма" : "Ошибки"],
+      ["Отчет", "Дата проверки", formatStoredDate(time.startedAtLocal || "")],
+      ["Отчет", "Часовой пояс", time.timeZone || ""],
+      ["Отчет", "Длительность, мс", String(result.elapsedMs || 0)],
+      ["Проверка", "Тип сборки", measurement.cableType || ""],
+      ["Проверка", "Прибор", measurement.deviceId || ""],
+      ["Проверка", "Оператор", measurement.operator || ""],
+      ["Эталон", "Имя", reference.name || result.reference || ""],
+      ["Эталон", "Тип сборки", reference.cableType || ""],
+      ["Эталон", "Ревизия", reference.revision || ""],
+      ["Эталон", "Прибор", reference.deviceId || ""],
+      ["Эталон", "Оператор", reference.operator || ""],
+      ["Эталон", "Статус", approvalStatusLabel(reference.approvalStatus)],
+      ["Сводка", "Ожидалось связей", String(summary.expectedLinks || 0)],
+      ["Сводка", "Измерено связей", String(summary.measuredLinks || 0)],
+      ["Сводка", "Обрывы", String(summary.missingLinks || 0)],
+      ["Сводка", "Паразитные", String(summary.extraLinks || 0)],
+      ["Сводка", "Асимметрия", String(summary.asymmetricLinks || 0)],
+      [],
+      ["Тип", "Контакт A", "Контакт B", "Задержка"]
+    ];
+
+    const appendPairs = (title, pairs) => {
+      for (const pair of Array.isArray(pairs) ? pairs : []) {
+        rows.push([
+          title,
+          contactLabel(pair.source ?? pair.a),
+          contactLabel(pair.target ?? pair.b),
+          String(pair.delayUs ?? pair.delayMs ?? "")
+        ]);
+      }
+    };
+
+    appendPairs("Обрыв", result.missing);
+    appendPairs("Паразитная связь", result.extra);
+    appendPairs("Асимметрия", result.asymmetric);
+
+    const exportName = String(fileName || "report.json").replace(/\.json$/i, ".csv");
+    downloadTextFile(exportName, rows.map((row) => row.map(csvEscape).join(";")).join("\n"), "text/csv;charset=utf-8");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 function renderJournal(files) {
   const target = $("journalTable");
   const summary = $("journalSummary");
@@ -1343,7 +1399,7 @@ function renderJournal(files) {
       <td>${escapeHtml(String(item.missingLinks || 0))}</td>
       <td>${escapeHtml(String(item.extraLinks || 0))}</td>
       <td>${escapeHtml(String(item.asymmetricLinks || 0))}</td>
-      <td><div class="journal-actions"><button type="button" data-open-report="${escapeHtml(item.file)}">Открыть</button><button type="button" data-delete-report="${escapeHtml(item.file)}" ${serviceUnlockEnabled ? "" : "hidden"}>Удалить</button><a href="/api/download?type=calculation&file=${encodeURIComponent(item.file)}">Выгрузить</a></div></td>
+      <td><div class="journal-actions"><button type="button" data-open-report="${escapeHtml(item.file)}">Открыть</button><button type="button" data-export-report-csv="${escapeHtml(item.file)}">Экспорт CSV</button><button type="button" data-delete-report="${escapeHtml(item.file)}" ${serviceUnlockEnabled ? "" : "hidden"}>Удалить</button><a href="/api/download?type=calculation&file=${encodeURIComponent(item.file)}">Выгрузить</a></div></td>
     </tr>`;
   }).join("");
 
@@ -1359,6 +1415,11 @@ function renderJournal(files) {
   target.querySelectorAll("[data-open-report]").forEach((button) => {
     button.addEventListener("click", async () => {
       await loadResult(button.dataset.openReport);
+    });
+  });
+  target.querySelectorAll("[data-export-report-csv]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await exportCalculationReportCsv(button.dataset.exportReportCsv);
     });
   });
   target.querySelectorAll("[data-delete-report]").forEach((button) => {

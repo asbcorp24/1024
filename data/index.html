@@ -12,7 +12,10 @@
       <h1>Контроль кабельных сборок</h1>
       <p>ESP32-S3 · 64 MCP23017 · 1024 линии · асинхронный W5500</p>
     </div>
-    <div id="deviceBadge" class="badge neutral">Подключение...</div>
+    <div class="topbar-actions">
+      <a class="topbar-link" href="/admin.html">Админ-страница</a>
+      <div id="deviceBadge" class="badge neutral">Подключение...</div>
+    </div>
   </header>
 
   <main class="layout">
@@ -44,7 +47,10 @@
           <h2>Создать эталон v3</h2>
           <p>Метаданные и матрица сохраняются в одном файле <code>.ref</code>. Дата и часовой пояс берутся из браузера автоматически.</p>
         </div>
-        <button id="toggleReferenceFormButton" class="secondary" type="button" aria-expanded="false" aria-controls="referenceFormPanel">Открыть</button>
+        <div class="card-head-actions">
+          <a class="button-link secondary-link" href="/admin.html">Открыть админ-страницу</a>
+          <button id="toggleReferenceFormButton" class="secondary" type="button" aria-expanded="false" aria-controls="referenceFormPanel">Открыть</button>
+        </div>
       </div>
       <div id="referenceFormPanel" class="collapsible-panel" hidden>
         <div class="form-grid">

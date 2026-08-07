@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Администрирование эталонов 1024</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Администрирование эталонов</h1>
+      <p>Создание эталонов, загрузка файлов и управление журналом эталонов</p>
+    </div>
+    <div class="topbar-actions">
+      <a class="topbar-link" href="/">Страница проверки</a>
+      <div id="deviceBadge" class="badge neutral">Подключение...</div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="card wide">
+      <div class="admin-hero">
+        <div class="admin-hero-box">
+          <h2>Админ-режим в браузере</h2>
+          <p>Эта страница собрана только для работы с эталонами. Здесь можно создать новый эталон, загрузить файл в устройство и удалить старые записи без лишних блоков проверки кабеля.</p>
+          <div class="admin-actions">
+            <a class="button-link secondary-link" href="/">К странице проверки</a>
+            <button id="refreshAdminButton" class="secondary" type="button">Обновить</button>
+          </div>
+          <div id="serviceLockNote" class="admin-lock-note" hidden>Сервисный тумблер выключен. Создание, загрузка и удаление станут доступны после включения сервисного режима.</div>
+        </div>
+        <div class="admin-state-grid">
+          <div class="admin-hero-box">
+            <h3>Состояние доступа</h3>
+            <div id="serviceBadge" class="badge neutral">Проверка...</div>
+            <p id="serviceText" class="message">Ожидание данных устройства...</p>
+          </div>
+          <div class="admin-hero-box">
+            <h3>Состояние устройства</h3>
+            <div id="engineBadge" class="badge neutral">Ожидание</div>
+            <p id="engineText" class="message">Данные движка будут показаны после подключения.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card wide">
+      <div class="card-head">
+        <div>
+          <h2>Создать эталон v3</h2>
+          <p>Дата и время будут взяты из браузера автоматически. Эталон сохранится как единый файл <code>.ref</code>.</p>
+        </div>
+      </div>
+      <div class="form-grid">
+        <label>
+          Название эталона
+          <input id="referenceName" type="text" maxlength="63" placeholder="Например: КС-17 ревизия 3" required>
+        </label>
+        <label>
+          Тип кабельной сборки
+          <input id="cableType" type="text" maxlength="63" placeholder="Например: КС-17" required>
+        </label>
+        <label>
+          Ревизия
+          <input id="revision" type="text" maxlength="31" placeholder="Например: 03" required>
+        </label>
+        <label>
+          Прибор, на котором создан эталон
+          <input id="deviceId" type="text" maxlength="63" placeholder="Например: КСК-1024 №0001" list="deviceSuggestions" autocomplete="off" required>
+        </label>
+        <label>
+          Оператор
+          <input id="operatorName" type="text" maxlength="95" placeholder="ФИО или табельный номер" list="operatorSuggestions" autocomplete="off" required>
+        </label>
+        <label>
+          CRC32 таблицы соединений
+          <input id="mappingCrc32" type="text" maxlength="10" placeholder="Например: A4C18B39" pattern="(?:0[xX])?[0-9A-Fa-f]{1,8}">
+          <small>Оставьте пустым, если таблица соединений не используется.</small>
+        </label>
+        <label>
+          Статус утверждения
+          <select id="approvalStatus">
+            <option value="draft">Черновик</option>
+            <option value="pending">На утверждении</option>
+            <option value="approved">Утверждён</option>
+            <option value="rejected">Отклонён</option>
+            <option value="archived">Архивный</option>
+          </select>
+        </label>
+        <label class="span-two">
+          Комментарий
+          <textarea id="referenceComment" maxlength="255" rows="3" placeholder="Основание создания, особенности кабеля, номер документа"></textarea>
+        </label>
+      </div>
+      <div class="admin-actions">
+        <button id="captureButton" class="primary" type="button">Запустить эталонный замер</button>
+        <button id="saveManualReferenceButton" class="secondary" type="button">Сохранить ручной эталон</button>
+      </div>
+      <div id="manualEditingState" class="message">Сейчас открыт режим создания нового ручного эталона.</div>
+      <div class="message">Поля выше используются и для автоматического замера, и для ручного эталона.</div>
+    </section>
+
+    <datalist id="deviceSuggestions"></datalist>
+    <datalist id="operatorSuggestions"></datalist>
+
+    <section class="card wide">
+      <div class="card-head">
+        <div>
+          <h2>Ручной конструктор эталона</h2>
+          <p>Контакты нумеруются от <code>1</code> до <code>1024</code>. Выберите два контакта кликом по полю или введите их вручную, чтобы добавить ожидаемую связь.</p>
+        </div>
+      </div>
+      <div class="manual-editor-layout">
+        <div class="manual-editor-panel">
+          <div class="form-grid">
+            <label>
+              Контакт A
+              <input id="manualContactA" type="number" min="1" max="1024" step="1" placeholder="1..1024">
+            </label>
+            <label>
+              Контакт B
+              <input id="manualContactB" type="number" min="1" max="1024" step="1" placeholder="1..1024">
+            </label>
+          </div>
+          <div class="admin-actions">
+            <button id="addManualPairButton" class="secondary" type="button">Добавить связь</button>
+            <button id="clearManualPairsButton" class="secondary" type="button">Очистить всё</button>
+          </div>
+          <div id="manualEditorStatus" class="message">Пока связей нет. Выберите два контакта, чтобы добавить первую пару.</div>
+          <div class="manual-pair-list-wrap">
+            <div id="manualPairList" class="empty">Список связей пока пуст.</div>
+          </div>
+        </div>
+        <div class="manual-editor-canvas-wrap">
+          <div class="manual-editor-legend">
+            <span><i class="manual-dot idle"></i> свободный контакт</span>
+            <span><i class="manual-dot used"></i> участвует в связи</span>
+            <span><i class="manual-dot selected"></i> выбран сейчас</span>
+            <span><i class="manual-dot active"></i> подсвеченная пара</span>
+          </div>
+          <div id="manualHoverInfo" class="message">Наведите курсор на ячейку, чтобы увидеть номер контакта.</div>
+          <div class="matrix-wrap">
+            <canvas id="manualMatrixCanvas" width="640" height="640"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card wide">
+      <div class="card-head">
+        <div>
+          <h2>Загрузка файлов в устройство</h2>
+          <p>Можно загрузить эталон <code>.ref</code> или отчет <code>.json</code> прямо из браузера.</p>
+        </div>
+      </div>
+      <div class="upload-grid">
+        <div class="upload-box">
+          <h3>Загрузить эталон</h3>
+          <input id="referenceUploadInput" type="file" accept=".ref,application/octet-stream">
+          <button id="referenceUploadButton" class="secondary" type="button">Загрузить эталон</button>
+          <div class="upload-progress"><div id="referenceUploadBar"></div></div>
+          <small id="referenceUploadText">Файл не выбран</small>
+        </div>
+        <div class="upload-box">
+          <h3>Загрузить отчет</h3>
+          <input id="calculationUploadInput" type="file" accept=".json,application/json,application/octet-stream">
+          <button id="calculationUploadButton" class="secondary" type="button">Загрузить отчет</button>
+          <div class="upload-progress"><div id="calculationUploadBar"></div></div>
+          <small id="calculationUploadText">Файл не выбран</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="card wide">
+      <div class="card-head">
+        <h2>Журнал эталонов</h2>
+        <div class="card-head-actions">
+          <div id="referenceSummary" class="badge neutral">0 записей</div>
+          <button id="refreshReferencesButton" class="secondary" type="button">Обновить список</button>
+        </div>
+      </div>
+      <div class="journal-toolbar">
+        <label class="journal-sort">
+          <span>Сортировка</span>
+          <select id="referenceSort">
+            <option value="date_desc">Дата: сначала новые</option>
+            <option value="date_asc">Дата: сначала старые</option>
+            <option value="name_asc">Название: А-Я</option>
+            <option value="name_desc">Название: Я-А</option>
+          </select>
+        </label>
+        <div id="referencePagination" class="journal-pagination" hidden></div>
+      </div>
+      <div id="referenceTable" class="empty">Записей пока нет.</div>
+    </section>
+
+    <section class="card wide">
+      <div class="card-head">
+        <h2>Просмотр эталона</h2>
+      </div>
+      <div id="referencePreview" class="admin-preview">
+        <div class="message">Выберите эталон в журнале, чтобы посмотреть его данные.</div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/admin.js"></script>
+</body>
+</html>
