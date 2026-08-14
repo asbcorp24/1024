@@ -167,6 +167,8 @@ function applyServiceProtection(device) {
   serviceUnlockEnabled = Boolean(device?.serviceUnlockEnabled);
 
   if ($("captureButton")) $("captureButton").hidden = !serviceUnlockEnabled;
+  if ($("adminPageLink")) $("adminPageLink").hidden = !serviceUnlockEnabled;
+  if ($("openAdminPageButton")) $("openAdminPageButton").hidden = !serviceUnlockEnabled;
   if ($("toggleReferenceFormButton")) $("toggleReferenceFormButton").hidden = !serviceUnlockEnabled;
   if ($("toggleUploadPanelButton")) $("toggleUploadPanelButton").hidden = !serviceUnlockEnabled;
   if ($("referenceFormPanel") && !serviceUnlockEnabled) $("referenceFormPanel").hidden = true;
