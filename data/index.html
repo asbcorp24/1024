@@ -46,7 +46,7 @@
       <div class="card-head">
         <div>
           <h2>Создать эталон v3</h2>
-          <p>Метаданные и матрица сохраняются в одном файле <code>.ref</code>. Дата и часовой пояс берутся из браузера автоматически.</p>
+          <p>Метаданные и матрица сохраняются в одном файле <code>.ref</code>. Для времени используются системные часы ESP32/DS3231; если они не синхронизированы, применяется время браузера.</p>
         </div>
         <div class="card-head-actions">
           <a id="openAdminPageButton" class="button-link secondary-link" href="/admin.html" hidden>Открыть админ-страницу</a>
@@ -147,7 +147,7 @@
       <div class="card-head">
         <div>
           <h2>Настройка даты и времени</h2>
-          <p>Синхронизация времени ESP32 с текущим временем браузера. После подключения DS3231 этот же механизм можно использовать для записи времени в RTC.</p>
+          <p>Синхронизация системного времени ESP32 и часов DS3231 с текущим временем браузера.</p>
         </div>
         <button id="syncTimeButton" class="secondary">Синхронизировать с браузером</button>
       </div>
@@ -166,7 +166,7 @@
         <div class="upload-grid">
           <div class="upload-box">
             <h3>Загрузить эталон</h3>
-            <p>Принимается только формат <code>.ref v3</code>. Эталон, матрица и расчёты хранятся в сжатом виде.</p>
+            <p>Принимается только формат <code>.ref v3</code>. Измерительная матрица эталона хранится в RLE-сжатом виде.</p>
             <input id="referenceUploadInput" type="file" accept=".ref,application/octet-stream">
             <button id="referenceUploadButton" class="secondary">Загрузить эталон</button>
             <div class="upload-progress"><div id="referenceUploadBar"></div></div>
@@ -174,7 +174,7 @@
           </div>
           <div class="upload-box">
             <h3>Загрузить расчёт</h3>
-            <p>Допускаются JSON-отчёты <code>.json</code>.</p>
+            <p>Допускаются JSON-отчёты <code>.json</code>; измерительная матрица внутри отчёта хранится в упакованном виде.</p>
             <input id="calculationUploadInput" type="file" accept=".json,application/json,application/octet-stream">
             <button id="calculationUploadButton" class="secondary">Загрузить расчёт</button>
             <div class="upload-progress"><div id="calculationUploadBar"></div></div>
