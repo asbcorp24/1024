@@ -3,6 +3,25 @@
 // Загружается после app.js и переопределяет exportCalculationReportCsv().
 
 (function () {
+  function addAboutPageLink() {
+    const actions = document.querySelector(".topbar-actions");
+    if (!actions || actions.querySelector('a[href="/about.html"]')) return;
+
+    const link = document.createElement("a");
+    link.className = "topbar-link";
+    link.href = "/about.html";
+    link.textContent = "О программе";
+
+    const badge = actions.querySelector("#deviceBadge");
+    actions.insertBefore(link, badge || null);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", addAboutPageLink, { once: true });
+  } else {
+    addAboutPageLink();
+  }
+
   function pairKey(a, b) {
     const left = Math.min(Number(a), Number(b));
     const right = Math.max(Number(a), Number(b));
