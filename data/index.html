@@ -98,9 +98,16 @@
       </div>
     </section>
 
-    <section class="card wide">
-      <h2>Проверить кабель</h2>
-      <p>Выберите сохранённый или загруженный эталон v3 и запустите полное сравнение.</p>
+    <section class="card wide page-stretch">
+      <div class="card-head">
+        <div>
+          <h2>Проверить кабель</h2>
+          <p>Выберите сохранённый или загруженный эталон v3 и запустите полное сравнение.</p>
+        </div>
+        <div class="card-head-actions">
+          <button id="toggleReferenceGuideButton" class="secondary" type="button" aria-expanded="true" aria-controls="referenceGuidePanel">Скрыть</button>
+        </div>
+      </div>
       <label>
         Эталон
         <select id="referenceSelect"></select>
@@ -120,6 +127,16 @@
         </label>
       </div>
       <button id="testButton" class="primary">Запустить проверку</button>
+      <div id="referenceGuidePanel" class="collapsible-panel">
+        <div id="referenceGuideSummary" class="message" style="margin-top:1rem;">Выберите эталон, чтобы увидеть подсказку по раскладке жгутов по 16 блокам.</div>
+        <div id="referenceGuideLegend" class="reference-guide-legend">
+          <div class="empty">Легенда по жгутам появится после выбора эталона.</div>
+        </div>
+        <div id="referenceGuideGrid" class="reference-guide-grid">
+          <div class="empty">Подсказка по блокам пока не загружена.</div>
+        </div>
+        <div id="matrixConnections" class="guide-connections-box empty" style="margin-top:1rem;">Список связей пока пуст.</div>
+      </div>
     </section>
 
     <datalist id="deviceSuggestions"></datalist>
@@ -169,9 +186,16 @@
     <section class="card wide">
       <div class="card-head">
         <h2>Последний результат</h2>
-        <button id="refreshResultsButton" class="secondary">Обновить</button>
+        <div class="card-head-actions">
+          <button id="toggleNamedConnectionsButton" class="secondary" type="button">Показать провода и маркировку</button>
+          <button id="refreshResultsButton" class="secondary">Обновить</button>
+        </div>
       </div>
       <div id="resultSummary" class="empty">Результатов пока нет.</div>
+      <div id="namedConnectionsBlock" class="named-connections-block" hidden>
+        <div id="namedConnectionsSummary" class="message">Список будет показан после открытия эталона или результата.</div>
+        <div id="namedConnectionsTable" class="empty">Связи пока не загружены.</div>
+      </div>
       <div id="errorTables" hidden>
         <h3>Обрывы</h3>
         <div id="missingTable"></div>
@@ -179,32 +203,6 @@
         <div id="extraTable"></div>
         <h3>Асимметричные измерения</h3>
         <div id="asymmetricTable"></div>
-      </div>
-    </section>
-
-    <section class="card wide">
-      <div class="card-head">
-        <div>
-          <h2 id="matrixTitle">Матрица связей 64×64</h2>
-          <p id="matrixSubtitle">Выберите эталон или откройте результат, чтобы увидеть цветовую карту связей по всем 64 модулям.</p>
-        </div>
-      </div>
-      <div id="matrixLegend" class="matrix-legend"></div>
-      <div id="matrixLegendNote" class="matrix-note"></div>
-      <div class="matrix-layout">
-        <div>
-          <div class="matrix-axis-top" id="matrixAxisTop"></div>
-          <div class="matrix-board">
-            <div class="matrix-axis-left" id="matrixAxisLeft"></div>
-            <div class="matrix-wrap">
-              <canvas id="matrixCanvas" width="512" height="512"></canvas>
-            </div>
-          </div>
-        </div>
-        <aside class="matrix-side">
-          <div id="matrixMeta" class="message">Сводка по матрице появится после открытия эталона или результата.</div>
-          <div id="matrixConnections" class="empty">Список связей пока пуст.</div>
-        </aside>
       </div>
     </section>
 

@@ -29,7 +29,15 @@ public:
     bool loadReference(const String& fileName,
                        uint8_t* matrix,
                        ReferenceFileHeader& header,
+                       String* annotationsJson,
                        String& error);
+
+    bool loadReference(const String& fileName,
+                       uint8_t* matrix,
+                       ReferenceFileHeader& header,
+                       String& error) {
+        return loadReference(fileName, matrix, header, nullptr, error);
+    }
 
     bool loadMeasurement(const String& fileName,
                          uint8_t* matrix,

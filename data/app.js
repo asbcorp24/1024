@@ -14,6 +14,8 @@ let currentCalculations = [];
 let currentReferences = [];
 let currentResultForPrint = null;
 let serviceUnlockEnabled = false;
+let namedConnectionsExpanded = false;
+let selectedGuideMark = "";
 
 const JOURNAL_PAGE_SIZE = 20;
 const HISTORY_LIMIT = 20;
@@ -123,6 +125,115 @@ function contactLabel(pin) {
   return `Контакт ${contactNumber(pin)}`;
 }
 
+function logicalPinText(value) {
+  return String(value ?? "").trim();
+}
+
+function pairNamedEndpoint(mark, logicalPin, pin) {
+  const markText = String(mark ?? "").trim();
+  const logicalText = logicalPinText(logicalPin);
+  if (markText && logicalText) return `${markText}/${logicalText}`;
+  if (markText) return `${markText}/${contactNumber(pin)}`;
+  if (logicalText) return logicalText;
+  return contactLabel(pin);
+}
+
+function pairDisplayText(pair) {
+  const wire = pair?.wireName ? `Провод ${pair.wireName}` : "Связь";
+  return `${wire}: ${pairNamedEndpoint(pair?.markA, pair?.localPinA, pair?.a)} ↔ ${pairNamedEndpoint(pair?.markB, pair?.localPinB, pair?.b)}`;
+}
+
+function pairMetaText(pair) {
+  const items = [];
+  if (pair?.wireName) items.push(`провод ${pair.wireName}`);
+  if (pair?.markA || pair?.localPinA) items.push(`A=${pairNamedEndpoint(pair?.markA, pair?.localPinA, pair?.a)}`);
+  if (pair?.markB || pair?.localPinB) items.push(`B=${pairNamedEndpoint(pair?.markB, pair?.localPinB, pair?.b)}`);
+  items.push(`каналы=${contactNumber(pair?.a)}↔${contactNumber(pair?.b)}`);
+  if (pair?.note) items.push(`примечание: ${pair.note}`);
+  return items.join(", ");
+}
+
+function normalizePairKey(a, b) {
+  const left = Math.min(Number(a), Number(b));
+  const right = Math.max(Number(a), Number(b));
+  return `${left}:${right}`;
+}
+
+function buildAnnotationMap(view) {
+  const map = new Map();
+  const annotations = Array.isArray(view?.annotations) ? view.annotations : [];
+  for (const item of annotations) {
+    map.set(normalizePairKey(item.a, item.b), item);
+  }
+  return map;
+}
+
+function buildContactAnnotationMap(view) {
+  const map = new Map();
+  const annotations = Array.isArray(view?.annotations) ? view.annotations : [];
+  const ensureEntry = (pin) => {
+    const key = Number(pin);
+    if (!map.has(key)) map.set(key, { marks: new Set(), wires: new Set() });
+    return map.get(key);
+  };
+
+  for (const item of annotations) {
+    const entryA = ensureEntry(item.a);
+    const entryB = ensureEntry(item.b);
+    if (item.markA) entryA.marks.add(String(item.markA));
+    if (item.markB) entryB.marks.add(String(item.markB));
+    if (item.wireName) {
+      entryA.wires.add(String(item.wireName));
+      entryB.wires.add(String(item.wireName));
+    }
+  }
+  return map;
+}
+
+function summarizeSet(values, limit = 3) {
+  const list = Array.from(values || []);
+  if (!list.length) return "";
+  if (list.length <= limit) return list.join("/");
+  return `${list.slice(0, limit).join("/")}/…`;
+}
+
+function enrichPairsWithAnnotations(pairs, annotationMap, contactAnnotationMap = new Map()) {
+  return (Array.isArray(pairs) ? pairs : []).map((pair) => {
+    if (pair?.wireName || pair?.markA || pair?.markB || pair?.note) return pair;
+    const annotation = annotationMap.get(normalizePairKey(pair?.a, pair?.b));
+    if (annotation) return { ...pair, ...annotation };
+
+    const contactA = contactAnnotationMap.get(Number(pair?.a));
+    const contactB = contactAnnotationMap.get(Number(pair?.b));
+    const inferredMarkA = summarizeSet(contactA?.marks);
+    const inferredMarkB = summarizeSet(contactB?.marks);
+    const inferredWireA = summarizeSet(contactA?.wires, 2);
+    const inferredWireB = summarizeSet(contactB?.wires, 2);
+
+    if (!inferredMarkA && !inferredMarkB && !inferredWireA && !inferredWireB) return pair;
+    return {
+      ...pair,
+      markA: pair?.markA || inferredMarkA,
+      markB: pair?.markB || inferredMarkB,
+      note: pair?.note || ((inferredWireA || inferredWireB)
+        ? `вне эталонной пары; A из проводов ${inferredWireA || "?"}, B из проводов ${inferredWireB || "?"}`
+        : "вне эталонной пары")
+    };
+  });
+}
+
+function pairsHaveAnnotations(pairs) {
+  return (Array.isArray(pairs) ? pairs : []).some((pair) => pair?.wireName || pair?.markA || pair?.markB || pair?.note);
+}
+
+function updateNamedConnectionsToggle() {
+  const button = $("toggleNamedConnectionsButton");
+  const block = $("namedConnectionsBlock");
+  if (!button || !block) return;
+  block.hidden = !namedConnectionsExpanded;
+  button.textContent = namedConnectionsExpanded ? "Скрыть провода и маркировку" : "Показать провода и маркировку";
+}
+
 function attachPairRowHandlers(target) {
   target.querySelectorAll("tbody tr[data-a][data-b]").forEach((row) => {
     row.classList.add("pair-row");
@@ -133,7 +244,7 @@ function attachPairRowHandlers(target) {
         a: Number(row.dataset.a),
         b: Number(row.dataset.b)
       };
-      if (currentMatrixView) renderMatrix(currentMatrixView);
+      if (currentMatrixView) renderReferenceGuide(currentMatrixView);
     });
   });
 }
@@ -374,9 +485,11 @@ function buildPrintPairsRows(title, pairs) {
   return list.map((pair, index) => `
     <tr>
       <td>${index + 1}</td>
-      <td>${escapeHtml(contactLabel(pair.source))}</td>
-      <td>${escapeHtml(contactLabel(pair.target))}</td>
+      <td>${escapeHtml(pairNamedEndpoint(pair?.markA, pair?.localPinA, pair?.source ?? pair?.a))}</td>
+      <td>${escapeHtml(pairNamedEndpoint(pair?.markB, pair?.localPinB, pair?.target ?? pair?.b))}</td>
       <td>${escapeHtml(title)}</td>
+      <td>${escapeHtml(pair?.wireName || "—")}</td>
+      <td>${escapeHtml(pairMetaText(pair) || "—")}</td>
       <td>${escapeHtml(String(pair.delayUs ?? pair.delayMs ?? "—"))}</td>
     </tr>
   `).join("");
@@ -393,10 +506,11 @@ function printCurrentResult() {
   const time = result.time || {};
   const reference = result.referenceMetadata || {};
   const measurement = result.measurementMetadata || {};
+  const printPairs = result.printPairs || {};
   const discrepancyRows =
-    buildPrintPairsRows("Обрыв", result.missing) +
-    buildPrintPairsRows("Паразитная связь", result.extra) +
-    buildPrintPairsRows("Асимметрия", result.asymmetric);
+    buildPrintPairsRows("Обрыв", printPairs.missing || result.missing) +
+    buildPrintPairsRows("Паразитная связь", printPairs.extra || result.extra) +
+    buildPrintPairsRows("Асимметрия", printPairs.asymmetric || result.asymmetric);
 
   const html = `<!doctype html>
 <html lang="ru">
@@ -445,7 +559,7 @@ function printCurrentResult() {
     <div><b>${formatSeconds(result.elapsedMs || 0)}</b><span>Длительность</span></div>
   </div>
   <h2>Выявленные несоответствия</h2>
-  ${discrepancyRows ? `<table class="report"><thead><tr><th>№</th><th>Контакт 1</th><th>Контакт 2</th><th>Тип</th><th>Задержка</th></tr></thead><tbody>${discrepancyRows}</tbody></table>` : "<div class=\"status\">Несоответствия не обнаружены.</div>"}
+  ${discrepancyRows ? `<table class="report"><thead><tr><th>№</th><th>Точка A</th><th>Точка B</th><th>Тип</th><th>Провод</th><th>Маркировка и каналы</th><th>Задержка</th></tr></thead><tbody>${discrepancyRows}</tbody></table>` : "<div class=\"status\">Несоответствия не обнаружены.</div>"}
   <div class="signatures">
     <div><div>Проверил</div><div class="sign"></div></div>
     <div><div>Принял</div><div class="sign"></div></div>
@@ -609,6 +723,7 @@ function renderMatrixMeta(view) {
   const activeCells = Number(view?.activeCellCount || 0);
   const settleUs = Number(view?.measurementSettleUs || 0);
   const scopeLabel = view?.scopeLabel || "Карта показывает укрупнённые пары модулей.";
+  const annotationsLoaded = Array.isArray(view?.annotations) ? view.annotations.length : 0;
 
   target.className = "message matrix-meta";
   target.innerHTML = `
@@ -617,6 +732,7 @@ function renderMatrixMeta(view) {
     Направленных срабатываний: ${escapeHtml(directed)}<br>
     Закрашенных клеток на карте: ${escapeHtml(activeCells)}<br>
     Выдержка перед чтением: ${escapeHtml(formatMicroseconds(settleUs))}<br>
+    annotations loaded: ${escapeHtml(annotationsLoaded)}<br>
     ${escapeHtml(scopeLabel)}
   `;
 }
@@ -752,87 +868,8 @@ function renderMatrixAxes(size) {
 
 function renderMatrix(view) {
   currentMatrixView = view;
-  $("matrixTitle").textContent = view?.kind === "reference" ? "Эталон: матрица связей 64×64" : "Результат: матрица связей 64×64";
-  $("matrixSubtitle").textContent = view?.subtitle || view?.title || "Матрица связей по 64 модулям.";
-  renderMatrixLegend(view?.legend || []);
-  renderMatrixMeta(view);
-  renderMatrixConnections(view);
-
-  const canvas = $("matrixCanvas");
-  const ctx = canvas.getContext("2d");
-  const size = Number(view?.size || 64);
-  renderMatrixAxes(size);
-  const scale = Math.floor(canvas.width / size);
-  const colors = new Map((view?.legend || []).map((item) => [item.code, item.color]));
-  const cells = Array.isArray(view?.cells) ? view.cells : [];
-
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  for (let row = 0; row < size; row += 1) {
-    for (let col = 0; col < size; col += 1) {
-      const code = Number(cells[row * size + col] ?? 0);
-      ctx.fillStyle = colors.get(code) || "#e2e8f0";
-      ctx.fillRect(col * scale, row * scale, scale, scale);
-    }
-  }
-
-  ctx.strokeStyle = "rgba(23,32,51,0.08)";
-  ctx.lineWidth = 1;
-  for (let line = 0; line <= size; line += 1) {
-    const pos = line * scale + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(0, pos);
-    ctx.lineTo(size * scale, pos);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(pos, 0);
-    ctx.lineTo(pos, size * scale);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = "rgba(23,32,51,0.22)";
-  ctx.lineWidth = 1.5;
-  for (let line = 0; line <= size; line += 8) {
-    const pos = line * scale + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(0, pos);
-    ctx.lineTo(size * scale, pos);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(pos, 0);
-    ctx.lineTo(pos, size * scale);
-    ctx.stroke();
-  }
-
-  if (selectedMatrixPair) {
-    const moduleA = Math.floor(Number(selectedMatrixPair.a) / 16);
-    const moduleB = Math.floor(Number(selectedMatrixPair.b) / 16);
-    const points = [
-      { row: moduleA, col: moduleB },
-      { row: moduleB, col: moduleA }
-    ];
-
-    ctx.strokeStyle = "#0f4c81";
-    ctx.lineWidth = 3;
-    ctx.fillStyle = "rgba(15,76,129,0.18)";
-    for (const point of points) {
-      ctx.fillRect(point.col * scale, point.row * scale, scale, scale);
-      ctx.strokeRect(point.col * scale + 1, point.row * scale + 1, Math.max(scale - 2, 1), Math.max(scale - 2, 1));
-    }
-
-    const label = `${contactLabel(selectedMatrixPair.a)} и ${contactLabel(selectedMatrixPair.b)}`;
-    const anchor = points[0];
-    const labelX = Math.min(anchor.col * scale + scale + 8, canvas.width - 170);
-    const labelY = Math.max(anchor.row * scale - 12, 18);
-    ctx.font = "12px Segoe UI";
-    const boxWidth = Math.min(ctx.measureText(label).width + 12, 168);
-    ctx.fillStyle = "rgba(15,76,129,0.92)";
-    ctx.fillRect(labelX - 4, labelY - 14, boxWidth, 18);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillText(label, labelX, labelY);
-  }
+  renderNamedConnectionsBlock(view);
+  renderReferenceGuide(view);
 }
 
 function buildMatrixRows(view) {
@@ -844,6 +881,215 @@ function buildMatrixRows(view) {
     if (rows.length) return rows;
   }
   return (view?.connections || []).map((item) => ({ ...item, kind: "ok", label: "Связь" }));
+}
+
+function buildReferenceGuideAssignments(view) {
+  const assignments = new Map();
+  const items = Array.isArray(view?.annotations) && view.annotations.length
+    ? view.annotations
+    : buildMatrixRows(view);
+
+  const addEndpoint = (pin, mark, localPin, wireName, note) => {
+    const physicalPin = Number(pin);
+    if (!Number.isInteger(physicalPin) || physicalPin < 0 || physicalPin >= 1024) return;
+    const normalizedMark = String(mark ?? "").trim();
+    const endpoint = pairNamedEndpoint(mark, localPin, physicalPin);
+    const metaParts = [];
+    if (wireName) metaParts.push(`провод ${wireName}`);
+    if (note) metaParts.push(note);
+    const meta = metaParts.join(" · ");
+    if (!assignments.has(physicalPin)) {
+      assignments.set(physicalPin, {
+        pin: physicalPin,
+        mark: normalizedMark,
+        endpoint,
+        metas: meta ? new Set([meta]) : new Set()
+      });
+      return;
+    }
+    const existing = assignments.get(physicalPin);
+    if (!existing.mark && normalizedMark) existing.mark = normalizedMark;
+    if (existing.endpoint !== endpoint) existing.endpoint = `${existing.endpoint} / ${endpoint}`;
+    if (meta) existing.metas.add(meta);
+  };
+
+  for (const item of items) {
+    addEndpoint(item?.a, item?.markA, item?.localPinA, item?.wireName, item?.note);
+    addEndpoint(item?.b, item?.markB, item?.localPinB, item?.wireName, item?.note);
+  }
+
+  return Array.from(assignments.values()).sort((left, right) => left.pin - right.pin);
+}
+
+function stringHash(value) {
+  let hash = 0;
+  const text = String(value ?? "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function harnessColor(mark) {
+  const text = String(mark ?? "").trim();
+  if (!text) {
+    return {
+      bg: "#dbeafe",
+      border: "#60a5fa",
+      pin: "#1d4ed8",
+      text: "#1e3a8a",
+      meta: "#334155"
+    };
+  }
+
+  const hue = stringHash(text) % 360;
+  return {
+    bg: `hsl(${hue} 88% 86%)`,
+    border: `hsl(${hue} 70% 58%)`,
+    pin: `hsl(${hue} 82% 28%)`,
+    text: `hsl(${hue} 58% 18%)`,
+    meta: `hsl(${hue} 34% 30%)`
+  };
+}
+
+function renderReferenceGuideLegend(assignments) {
+  const legend = $("referenceGuideLegend");
+  if (!legend) return;
+
+  const marks = Array.from(new Set((Array.isArray(assignments) ? assignments : [])
+    .map((item) => String(item?.mark || "").trim())
+    .filter(Boolean)))
+    .sort((left, right) => left.localeCompare(right, "ru"));
+
+  if (!marks.length) {
+    selectedGuideMark = "";
+    legend.innerHTML = '<div class="empty">Легенда по жгутам недоступна.</div>';
+    return;
+  }
+
+  if (selectedGuideMark && !marks.includes(selectedGuideMark)) selectedGuideMark = "";
+
+  legend.innerHTML = marks.map((mark) => {
+    const colors = harnessColor(mark);
+    return `
+      <button type="button" class="reference-guide-legend-item ${selectedGuideMark === mark ? "active" : ""}" data-guide-mark="${escapeHtml(mark)}">
+        <span class="reference-guide-legend-swatch" style="background:${escapeHtml(colors.bg)};border-color:${escapeHtml(colors.border)};"></span>
+        <span>${escapeHtml(mark)}</span>
+      </button>
+    `;
+  }).join("");
+
+  legend.querySelectorAll("[data-guide-mark]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const mark = button.dataset.guideMark || "";
+      selectedGuideMark = selectedGuideMark === mark ? "" : mark;
+      if (currentMatrixView) renderReferenceGuide(currentMatrixView);
+    });
+  });
+}
+
+function renderReferenceGuide(view) {
+  const summary = $("referenceGuideSummary");
+  const grid = $("referenceGuideGrid");
+  if (!summary || !grid) return;
+
+  const assignments = buildReferenceGuideAssignments(view);
+  if (!assignments.length) {
+    summary.textContent = "Для выбранного эталона нет данных по жгутам и контактам.";
+    renderReferenceGuideLegend([]);
+    grid.innerHTML = '<div class="empty">Подсказка по блокам недоступна.</div>';
+    return;
+  }
+
+  renderReferenceGuideLegend(assignments);
+
+  const blocks = Array.from({ length: 16 }, (_, index) => ({
+    index,
+    items: []
+  }));
+
+  for (const item of assignments) {
+    const blockIndex = Math.floor(item.pin / 64);
+    const positionInBlock = (item.pin % 64) + 1;
+    blocks[blockIndex].items.push({
+      ...item,
+      positionInBlock
+    });
+  }
+
+  summary.textContent = `Подсказка по раскладке: задействовано ${assignments.length} физических каналов. Ниже показаны все 16 блоков по 64 контакта и что в них вставлять.`;
+  grid.innerHTML = blocks.map((block) => {
+    const start = block.index * 64 + 1;
+    const end = start + 63;
+    const itemMap = new Map(block.items.map((item) => [item.positionInBlock, item]));
+    const rows = Array.from({ length: 64 }, (_, positionIndex) => {
+      const position = positionIndex + 1;
+      const item = itemMap.get(position);
+      const itemMark = String(item?.mark || "").trim();
+      const colors = harnessColor(itemMark);
+      const muted = Boolean(selectedGuideMark) && item && itemMark !== selectedGuideMark;
+      const focused = Boolean(selectedGuideMark) && item && itemMark === selectedGuideMark;
+      const selected = item && (
+        Number(item.pin) === Number(selectedMatrixPair?.a) ||
+        Number(item.pin) === Number(selectedMatrixPair?.b)
+      );
+      return `
+        <div class="reference-guide-cell ${item ? "occupied" : ""} ${muted ? "muted" : ""} ${focused ? "focused" : ""} ${selected ? "selected" : ""}" style="${item ? `--guide-bg:${colors.bg};--guide-border:${colors.border};--guide-pin:${colors.pin};--guide-text:${colors.text};--guide-meta:${colors.meta};` : ""}" title="${escapeHtml(item ? `${item.endpoint}${item.metas.size ? ` | ${Array.from(item.metas).join(" | ")}` : ""}` : `Позиция ${position} не используется`)}">
+          <div class="reference-guide-cell-pin">${escapeHtml(String(position))}</div>
+          ${item ? `
+            <div class="reference-guide-cell-body">
+              <div class="reference-guide-cell-endpoint">${escapeHtml(item.endpoint)}</div>
+              <div class="reference-guide-cell-meta">${escapeHtml(String(item.pin + 1))}</div>
+            </div>
+          ` : '<div class="reference-guide-cell-empty">—</div>'}
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div class="reference-guide-card">
+        <div class="reference-guide-head">
+          <strong>Блок ${escapeHtml(String(block.index + 1))}</strong>
+          <span>Каналы ${escapeHtml(String(start))}–${escapeHtml(String(end))}</span>
+        </div>
+        <div class="reference-guide-body">
+          <div class="reference-guide-panel">${rows}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderNamedConnectionsBlock(view) {
+  const summary = $("namedConnectionsSummary");
+  const table = $("namedConnectionsTable");
+  if (!summary || !table) return;
+
+  const items = buildMatrixRows(view).filter((item) => item.wireName || item.markA || item.markB || item.note);
+  const kindLabel = view?.kind === "reference" ? "эталона" : view?.kind === "result" ? "результата" : "данных";
+
+  if (!items.length) {
+    summary.textContent = `Для текущего ${kindLabel} нет сохранённых проводов или маркировок.`;
+    table.className = "empty";
+    table.textContent = "Нет данных по проводам.";
+    return;
+  }
+
+  summary.textContent = `Показано связей с именами проводов и маркировкой: ${items.length}.`;
+  const rows = items.map((item, index) => `
+    <tr data-a="${escapeHtml(item.a)}" data-b="${escapeHtml(item.b)}" data-kind="${escapeHtml(item.kind || "ok")}">
+      <td>${index + 1}</td>
+      <td>${statusChip(item.kind || "ok", item.label || "Связь")}</td>
+      <td class="wrap">${escapeHtml(item.wireName || "—")}</td>
+      <td class="wrap">${escapeHtml(pairNamedEndpoint(item.markA, item.localPinA, item.a))}</td>
+      <td class="wrap">${escapeHtml(pairNamedEndpoint(item.markB, item.localPinB, item.b))}</td>
+      <td class="wrap">${escapeHtml(item.note || "—")}</td>
+    </tr>
+  `).join("");
+
+  table.className = "";
+  table.innerHTML = `<div class="table-wrap"><table><thead><tr><th>#</th><th>Статус</th><th>Провод</th><th>Конец A</th><th>Конец B</th><th>Примечание</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  attachPairRowHandlers(table);
 }
 
 function renderMatrixConnections(view) {
@@ -859,12 +1105,17 @@ function renderMatrixConnections(view) {
 
   const rows = items
     .map((item) =>
-      `<tr data-a="${escapeHtml(item.a)}" data-b="${escapeHtml(item.b)}" data-kind="${escapeHtml(item.kind)}"><td>${statusChip(item.kind, item.label)}</td><td>${escapeHtml(contactLabel(item.a))}</td><td>${escapeHtml(contactLabel(item.b))}</td></tr>`)
+      `<tr data-a="${escapeHtml(item.a)}" data-b="${escapeHtml(item.b)}" data-kind="${escapeHtml(item.kind)}">` +
+      `<td>${statusChip(item.kind, item.label)}</td>` +
+      `<td>${escapeHtml(contactLabel(item.a))}</td>` +
+      `<td>${escapeHtml(contactLabel(item.b))}</td>` +
+      `<td class="wrap">${escapeHtml(pairDisplayText(item))}${pairMetaText(item) ? `<br><small>${escapeHtml(pairMetaText(item))}</small>` : ""}</td>` +
+      `</tr>`)
     .join("");
 
   target.className = "";
   target.innerHTML =
-    `<div class="table-wrap"><table><thead><tr><th>Статус</th><th>Контакт A</th><th>Контакт B</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    `<div class="table-wrap"><table><thead><tr><th>Статус</th><th>Контакт A</th><th>Контакт B</th><th>Провод и маркировка</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   attachPairRowHandlers(target);
 }
 
@@ -893,98 +1144,11 @@ function renderMatrixAxes(size) {
 
 function renderMatrix(view) {
   currentMatrixView = view;
-  $("matrixTitle").textContent = view?.kind === "reference" ? "Эталон: 1024 контакта" : "Результат: 1024 контакта";
-  $("matrixSubtitle").textContent = view?.kind === "reference"
-    ? "Квадрат контактов 32×32. Зеленым отмечены контакты, участвующие в эталонных связях."
-    : "Квадрат контактов 32×32. Цвет показывает контакты с совпадением или отличием.";
-  renderMatrixLegend(view?.legend || []);
-  renderMatrixMeta(view);
+  selectedMatrixPair = selectedMatrixPair && Number.isInteger(selectedMatrixPair.a) && Number.isInteger(selectedMatrixPair.b)
+    ? selectedMatrixPair
+    : null;
   renderMatrixConnections(view);
-
-  const canvas = $("matrixCanvas");
-  const ctx = canvas.getContext("2d");
-  const contactCount = 1024;
-  const side = 32;
-  canvas.width = 512;
-  canvas.height = 512;
-  renderMatrixAxes(contactCount);
-
-  const scale = canvas.width / side;
-  const contactCodes = new Array(contactCount).fill(0);
-  const mark = (items, code) => {
-    for (const item of items || []) {
-      const a = Number(item.a);
-      const b = Number(item.b);
-      if (Number.isInteger(a) && a >= 0 && a < contactCount) contactCodes[a] = Math.max(contactCodes[a], code);
-      if (Number.isInteger(b) && b >= 0 && b < contactCount) contactCodes[b] = Math.max(contactCodes[b], code);
-    }
-  };
-
-  if (view?.kind === "result") {
-    mark(view?.connections, 1);
-    mark(view?.extraConnections, 3);
-    mark(view?.missingConnections, 2);
-    mark(view?.asymmetricConnections, 4);
-  } else {
-    mark(view?.connections, 1);
-  }
-
-  const colors = new Map((view?.legend || []).map((item) => [item.code, item.color]));
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  for (let pin = 0; pin < contactCount; pin += 1) {
-    const row = Math.floor(pin / side);
-    const col = pin % side;
-    const code = contactCodes[pin];
-    ctx.fillStyle = colors.get(code) || "#e2e8f0";
-    ctx.fillRect(col * scale, row * scale, scale, scale);
-  }
-
-  ctx.strokeStyle = "rgba(23,32,51,0.12)";
-  ctx.lineWidth = 1;
-  for (let line = 0; line <= side; line += 1) {
-    const pos = line * scale + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(0, pos);
-    ctx.lineTo(canvas.width, pos);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(pos, 0);
-    ctx.lineTo(pos, canvas.height);
-    ctx.stroke();
-  }
-
-  if (selectedMatrixPair) {
-    const selected = [Number(selectedMatrixPair.a), Number(selectedMatrixPair.b)];
-    ctx.strokeStyle = "#0f4c81";
-    ctx.lineWidth = 3;
-    ctx.fillStyle = "rgba(15,76,129,0.18)";
-
-    selected.forEach((pin) => {
-      if (!Number.isInteger(pin) || pin < 0 || pin >= contactCount) return;
-      const row = Math.floor(pin / side);
-      const col = pin % side;
-      ctx.fillRect(col * scale, row * scale, scale, scale);
-      ctx.strokeRect(col * scale + 1, row * scale + 1, Math.max(scale - 2, 1), Math.max(scale - 2, 1));
-    });
-
-    const anchorPin = selected[0];
-    if (Number.isInteger(anchorPin) && anchorPin >= 0 && anchorPin < contactCount) {
-      const row = Math.floor(anchorPin / side);
-      const col = anchorPin % side;
-      const label = `${contactLabel(selected[0])} и ${contactLabel(selected[1])}`;
-      const labelX = Math.min(col * scale + scale + 8, canvas.width - 190);
-      const labelY = Math.max(row * scale - 10, 18);
-      ctx.font = "12px Segoe UI";
-      const boxWidth = Math.min(ctx.measureText(label).width + 12, 186);
-      ctx.fillStyle = "rgba(15,76,129,0.92)";
-      ctx.fillRect(labelX - 4, labelY - 14, boxWidth, 18);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText(label, labelX, labelY);
-    }
-  }
+  renderReferenceGuide(view);
 }
 
 async function loadReferenceView(fileName) {
@@ -1159,19 +1323,6 @@ async function loadFiles() {
   } catch (error) {
     toast(error.message);
   }
-}
-
-function renderPairs(target, pairs, truncated) {
-  if (!pairs?.length) {
-    target.innerHTML = '<div class="empty">Нет.</div>';
-    return;
-  }
-  const rows = pairs
-    .map((pair) => `<tr data-a="${escapeHtml(pair.a)}" data-b="${escapeHtml(pair.b)}"><td>${escapeHtml(contactLabel(pair.a))}</td><td>${escapeHtml(contactLabel(pair.b))}</td></tr>`)
-    .join("");
-  target.innerHTML =
-    `<div class="table-wrap"><table><thead><tr><th>Контакт A</th><th>Контакт B</th></tr></thead><tbody>${rows}</tbody></table></div>` +
-    `${truncated ? "<p>Список сокращён. Полное число указано в сводке.</p>" : ""}`;
 }
 
 async function runSinglePinDiagnostic() {
@@ -1500,36 +1651,6 @@ function renderReferenceJournal(files) {
   });
 }
 
-async function loadResult(fileName) {
-  try {
-    const result = await api(`/api/result?file=${encodeURIComponent(fileName)}`);
-    currentResultForPrint = result;
-    lastResultLoaded = fileName;
-    if ($("printResultButton")) $("printResultButton").disabled = false;
-    const summary = result.summary || {};
-    const storedTime = result.time || {};
-    const reference = result.referenceMetadata || {};
-
-    $("resultSummary").className = result.passed ? "result-ok" : "result-error";
-    $("resultSummary").innerHTML = `
-      <strong>${result.passed ? "КАБЕЛЬ ИСПРАВЕН" : "ОБНАРУЖЕНЫ ОТЛИЧИЯ"}</strong><br>
-      Испытание: ${escapeHtml(formatStoredDate(storedTime.startedAtLocal))} · ${escapeHtml(storedTime.timeZone || "часовой пояс не указан")}<br>
-      Эталон: ${escapeHtml(reference.name || result.reference || "не указан")} · ${escapeHtml(reference.cableType || "")} · рев. ${escapeHtml(reference.revision || "")}<br>
-      Статус эталона: ${escapeHtml(approvalStatusLabel(reference.approvalStatus))}; прибор: ${escapeHtml(reference.deviceId || "не указан")}; оператор эталона: ${escapeHtml(reference.operator || "не указан")}<br>
-      CRC таблицы: ${escapeHtml(formatCrc32(reference.mappingCrc32))}; CRC эталонной матрицы: ${escapeHtml(formatCrc32(reference.matrixCrc32))}<br>
-      Обрывы: ${summary.missingLinks || 0}; паразитные связи: ${summary.extraLinks || 0}; асимметрии: ${summary.asymmetricLinks || 0}; длительность: ${formatSeconds(result.elapsedMs || 0)}.
-    `;
-    $("errorTables").hidden = false;
-    renderPairs($("missingTable"), result.missing, result.missingTruncated);
-    renderPairs($("extraTable"), result.extra, result.extraTruncated);
-    renderPairs($("asymmetricTable"), result.asymmetric, result.asymmetricTruncated);
-    await loadResultView(fileName);
-    revealOpenedResult(fileName);
-  } catch (error) {
-    toast(error.message);
-  }
-}
-
 function uploadFile(kind, input, bar, text) {
   if (!serviceUnlockEnabled) return toast(serviceUnlockMessage());
   const file = input.files?.[0];
@@ -1707,6 +1828,7 @@ for (const id of ["calculationFilterDateFrom", "calculationFilterDateTo", "calcu
 
 setupCollapsiblePanel("toggleReferenceFormButton", "referenceFormPanel");
 setupCollapsiblePanel("toggleUploadPanelButton", "uploadPanel");
+setupCollapsiblePanel("toggleReferenceGuideButton", "referenceGuidePanel");
 setupStorageUi();
 
 if ($("journalSort")) {
@@ -1876,11 +1998,16 @@ function renderPairs(target, pairs, truncated) {
 
   const rows = pairs
     .map((pair) =>
-      `<tr data-a="${escapeHtml(pair.a)}" data-b="${escapeHtml(pair.b)}" data-kind="${escapeHtml(kind)}"><td>${statusChip(kind, label)}</td><td>${escapeHtml(contactLabel(pair.a))}</td><td>${escapeHtml(contactLabel(pair.b))}</td></tr>`)
+      `<tr data-a="${escapeHtml(pair.a)}" data-b="${escapeHtml(pair.b)}" data-kind="${escapeHtml(kind)}">` +
+      `<td>${statusChip(kind, label)}</td>` +
+      `<td>${escapeHtml(contactLabel(pair.a))}</td>` +
+      `<td>${escapeHtml(contactLabel(pair.b))}</td>` +
+      `<td class="wrap">${escapeHtml(pairDisplayText(pair))}${pairMetaText(pair) ? `<br><small>${escapeHtml(pairMetaText(pair))}</small>` : ""}</td>` +
+      `</tr>`)
     .join("");
 
   target.innerHTML =
-    `<div class="table-wrap"><table><thead><tr><th>Статус</th><th>Контакт A</th><th>Контакт B</th></tr></thead><tbody>${rows}</tbody></table></div>` +
+    `<div class="table-wrap"><table><thead><tr><th>Статус</th><th>Контакт A</th><th>Контакт B</th><th>Провод и маркировка</th></tr></thead><tbody>${rows}</tbody></table></div>` +
     `${truncated ? "<p>Список сокращен. Полное число указано в сводке.</p>" : ""}`;
   attachPairRowHandlers(target);
 }
@@ -1969,7 +2096,6 @@ function renderFiles(element, files, type) {
 async function loadResult(fileName) {
   try {
     const result = await api(`/api/result?file=${encodeURIComponent(fileName)}`);
-    currentResultForPrint = result;
     lastResultLoaded = fileName;
     if ($("printResultButton")) $("printResultButton").disabled = false;
     const summary = result.summary || {};
@@ -1988,10 +2114,35 @@ async function loadResult(fileName) {
       Обрывы: ${summary.missingLinks || 0}; паразитные связи: ${summary.extraLinks || 0}; асимметрии: ${summary.asymmetricLinks || 0}; длительность: ${formatSeconds(result.elapsedMs || 0)}.
     `;
     $("errorTables").hidden = false;
-    renderPairs($("missingTable"), result.missing, result.missingTruncated);
-    renderPairs($("extraTable"), result.extra, result.extraTruncated);
-    renderPairs($("asymmetricTable"), result.asymmetric, result.asymmetricTruncated);
     await loadResultView(fileName);
+    let missingPairs = currentMatrixView?.missingConnections || result.missing;
+    let extraPairs = currentMatrixView?.extraConnections || result.extra;
+    let asymmetricPairs = currentMatrixView?.asymmetricConnections || result.asymmetric;
+
+    if (!pairsHaveAnnotations(missingPairs) && result.reference) {
+      try {
+        const referenceView = await api(`/api/reference/view?file=${encodeURIComponent(result.reference)}`);
+        const annotationMap = buildAnnotationMap(referenceView);
+        const contactAnnotationMap = buildContactAnnotationMap(referenceView);
+        missingPairs = enrichPairsWithAnnotations(missingPairs, annotationMap, contactAnnotationMap);
+        extraPairs = enrichPairsWithAnnotations(extraPairs, annotationMap, contactAnnotationMap);
+        asymmetricPairs = enrichPairsWithAnnotations(asymmetricPairs, annotationMap, contactAnnotationMap);
+      } catch (annotationError) {
+        console.warn("Could not enrich result pairs from reference annotations", annotationError);
+      }
+    }
+
+    renderPairs($("missingTable"), missingPairs, result.missingTruncated);
+    renderPairs($("extraTable"), extraPairs, result.extraTruncated);
+    renderPairs($("asymmetricTable"), asymmetricPairs, result.asymmetricTruncated);
+    currentResultForPrint = {
+      ...result,
+      printPairs: {
+        missing: missingPairs,
+        extra: extraPairs,
+        asymmetric: asymmetricPairs
+      }
+    };
     revealOpenedResult(fileName);
   } catch (error) {
     toast(error.message);
@@ -2024,6 +2175,12 @@ if ($("testButton")) {
   });
 }
 
+$("toggleNamedConnectionsButton")?.addEventListener("click", () => {
+  namedConnectionsExpanded = !namedConnectionsExpanded;
+  updateNamedConnectionsToggle();
+});
+
+updateNamedConnectionsToggle();
 loadInitialStatus();
 connectEvents();
 loadDevice();

@@ -5,6 +5,7 @@
 #include <LittleFS.h>
 #include <Network.h>
 #include <cstdlib>
+#include <memory>
 #include <esp32-hal-log.h>
 #include <time.h>
 #include <esp_heap_caps.h>
@@ -225,6 +226,7 @@ void summarizeModulePair(const uint8_t* matrix,
 
 void appendConnectedPairsJson(String& json,
                               const uint8_t* matrix,
+                              JsonArrayConst annotations,
                               size_t& emittedCount) {
     emittedCount = 0;
     json += '[';
@@ -244,6 +246,22 @@ void appendConnectedPairsJson(String& json,
                 json += String(b);
                 json += ",\"settleUs\":";
                 json += String(AppConfig::SOURCE_SETTLE_US);
+                for (JsonObjectConst annotation : annotations) {
+                    if ((annotation["a"] | 0) != a || (annotation["b"] | 0) != b) continue;
+                    const String wireName = annotation["wireName"] | "";
+                    const String markA = annotation["markA"] | "";
+                    const String localPinA = annotation["localPinA"] | "";
+                    const String markB = annotation["markB"] | "";
+                    const String localPinB = annotation["localPinB"] | "";
+                    const String note = annotation["note"] | "";
+                    if (!wireName.isEmpty()) json += ",\"wireName\":\"" + jsonEscape(wireName) + "\"";
+                    if (!markA.isEmpty()) json += ",\"markA\":\"" + jsonEscape(markA) + "\"";
+                    if (!localPinA.isEmpty()) json += ",\"localPinA\":\"" + jsonEscape(localPinA) + "\"";
+                    if (!markB.isEmpty()) json += ",\"markB\":\"" + jsonEscape(markB) + "\"";
+                    if (!localPinB.isEmpty()) json += ",\"localPinB\":\"" + jsonEscape(localPinB) + "\"";
+                    if (!note.isEmpty()) json += ",\"note\":\"" + jsonEscape(note) + "\"";
+                    break;
+                }
                 json += '}';
                 ++emittedCount;
             }
@@ -253,9 +271,70 @@ void appendConnectedPairsJson(String& json,
     json += ']';
 }
 
+void appendDeltaPairsJson(String& json,
+                         const uint8_t* reference,
+                         const uint8_t* measured,
+                         JsonArrayConst annotations,
+                         const char* mode) {
+    json += '[';
+    bool first = true;
+
+    for (uint16_t a = 0; a < AppConfig::PIN_COUNT; ++a) {
+        for (uint16_t b = a + 1; b < AppConfig::PIN_COUNT; ++b) {
+            const bool refAB = bitAt(reference, a, b);
+            const bool refBA = bitAt(reference, b, a);
+            const bool meaAB = bitAt(measured, a, b);
+            const bool meaBA = bitAt(measured, b, a);
+
+            bool match = false;
+            if (strcmp(mode, "missing") == 0) {
+                match = refAB && refBA && !(meaAB && meaBA);
+            } else if (strcmp(mode, "extra") == 0) {
+                match = !refAB && !refBA && meaAB && meaBA;
+            } else if (strcmp(mode, "asymmetric") == 0) {
+                match = (meaAB != meaBA);
+            }
+            if (!match) continue;
+
+            if (!first) json += ',';
+            first = false;
+            json += "{\"a\":";
+            json += String(a);
+            json += ",\"b\":";
+            json += String(b);
+            json += ",\"settleUs\":";
+            json += String(AppConfig::SOURCE_SETTLE_US);
+            for (JsonObjectConst annotation : annotations) {
+                if ((annotation["a"] | 0) != a || (annotation["b"] | 0) != b) continue;
+                const String wireName = annotation["wireName"] | "";
+                const String markA = annotation["markA"] | "";
+                const String localPinA = annotation["localPinA"] | "";
+                const String markB = annotation["markB"] | "";
+                const String localPinB = annotation["localPinB"] | "";
+                const String note = annotation["note"] | "";
+                if (!wireName.isEmpty()) json += ",\"wireName\":\"" + jsonEscape(wireName) + "\"";
+                if (!markA.isEmpty()) json += ",\"markA\":\"" + jsonEscape(markA) + "\"";
+                if (!localPinA.isEmpty()) json += ",\"localPinA\":\"" + jsonEscape(localPinA) + "\"";
+                if (!markB.isEmpty()) json += ",\"markB\":\"" + jsonEscape(markB) + "\"";
+                if (!localPinB.isEmpty()) json += ",\"localPinB\":\"" + jsonEscape(localPinB) + "\"";
+                if (!note.isEmpty()) json += ",\"note\":\"" + jsonEscape(note) + "\"";
+                break;
+            }
+            json += '}';
+        }
+    }
+
+    json += ']';
+}
+
 String buildReferenceMatrixViewJson(const String& fileName,
                                     const ReferenceFileHeader& header,
-                                    const uint8_t* reference) {
+                                    const uint8_t* reference,
+                                    const String& annotationsJson) {
+    JsonDocument annotationsDocument;
+    if (!annotationsJson.isEmpty()) deserializeJson(annotationsDocument, annotationsJson);
+    const JsonArrayConst annotations = annotationsDocument.as<JsonArrayConst>();
+
     String json;
     json.reserve(22000);
     json += "{\"ok\":true,\"kind\":\"reference\"";
@@ -291,6 +370,7 @@ String buildReferenceMatrixViewJson(const String& fileName,
         String connectionsJson;
         appendConnectedPairsJson(connectionsJson,
                                  reference,
+                                 annotations,
                                  connectionCount);
         json += String(connectionCount);
         json += ",\"directedConnectionCount\":";
@@ -302,6 +382,8 @@ String buildReferenceMatrixViewJson(const String& fileName,
         json += ",\"scopeLabel\":\"Укрупнённая карта по 64 модулям; справа показаны точные пары контактов\"";
         json += ",\"connections\":";
         json += connectionsJson;
+        json += ",\"annotations\":";
+        json += annotationsJson.isEmpty() ? "[]" : annotationsJson;
         json += ",\"connectionsTruncated\":false";
     }
 
@@ -313,7 +395,12 @@ String buildResultMatrixViewJson(const String& fileName,
                                  const String& referenceFile,
                                  const String& title,
                                  const uint8_t* reference,
-                                 const uint8_t* measured) {
+                                 const uint8_t* measured,
+                                 const String& annotationsJson) {
+    JsonDocument annotationsDocument;
+    if (!annotationsJson.isEmpty()) deserializeJson(annotationsDocument, annotationsJson);
+    const JsonArrayConst annotations = annotationsDocument.as<JsonArrayConst>();
+
     String json;
     json.reserve(26000);
     json += "{\"ok\":true,\"kind\":\"result\"";
@@ -371,7 +458,14 @@ String buildResultMatrixViewJson(const String& fileName,
         String connectionsJson;
         appendConnectedPairsJson(connectionsJson,
                                  measured,
+                                 annotations,
                                  connectionCount);
+        String missingJson;
+        String extraJson;
+        String asymmetricJson;
+        appendDeltaPairsJson(missingJson, reference, measured, annotations, "missing");
+        appendDeltaPairsJson(extraJson, reference, measured, annotations, "extra");
+        appendDeltaPairsJson(asymmetricJson, reference, measured, annotations, "asymmetric");
         json += String(connectionCount);
         json += ",\"directedConnectionCount\":";
         json += String(connectionCount * 2U);
@@ -382,6 +476,14 @@ String buildResultMatrixViewJson(const String& fileName,
         json += ",\"scopeLabel\":\"Укрупнённая карта по 64 модулям; справа показаны фактически найденные пары контактов\"";
         json += ",\"connections\":";
         json += connectionsJson;
+        json += ",\"missingConnections\":";
+        json += missingJson;
+        json += ",\"extraConnections\":";
+        json += extraJson;
+        json += ",\"asymmetricConnections\":";
+        json += asymmetricJson;
+        json += ",\"annotations\":";
+        json += annotationsJson.isEmpty() ? "[]" : annotationsJson;
         json += ",\"connectionsTruncated\":false";
     }
 
@@ -989,14 +1091,15 @@ void WebApp::sendReferenceView(AsyncWebServerRequest* request) {
     }
 
     ReferenceFileHeader header {};
+    String annotationsJson;
     String error;
-    if (!storage_.loadReference(fileName, reference, header, error)) {
+    if (!storage_.loadReference(fileName, reference, header, &annotationsJson, error)) {
         free(reference);
         sendError(request, 404, error);
         return;
     }
 
-    const String json = buildReferenceMatrixViewJson(fileName, header, reference);
+    const String json = buildReferenceMatrixViewJson(fileName, header, reference, annotationsJson);
     free(reference);
     sendJson(request, 200, json);
 }
@@ -1044,7 +1147,8 @@ void WebApp::sendResultView(AsyncWebServerRequest* request) {
     }
 
     ReferenceFileHeader header {};
-    if (!storage_.loadReference(referenceFile, reference, header, error)) {
+    String annotationsJson;
+    if (!storage_.loadReference(referenceFile, reference, header, &annotationsJson, error)) {
         log_e("WebApp: sendResultView loadReference failed file=%s ref=%s error=%s",
               fileName.c_str(),
               referenceFile.c_str(),
@@ -1066,7 +1170,12 @@ void WebApp::sendResultView(AsyncWebServerRequest* request) {
         return;
     }
 
-    const String json = buildResultMatrixViewJson(fileName, referenceFile, title, reference, measured);
+    const String json = buildResultMatrixViewJson(fileName,
+                                                  referenceFile,
+                                                  title,
+                                                  reference,
+                                                  measured,
+                                                  annotationsJson);
     free(reference);
     free(measured);
     log_i("WebApp: sendResultView ok file=%s responseSize=%u",

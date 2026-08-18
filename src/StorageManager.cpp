@@ -17,6 +17,7 @@ namespace {
 constexpr const char* METADATA_DB_PATH = "/metadata.db";
 
 constexpr uint32_t PACKED_BLOB_MAGIC = 0x314B4350UL; // PCK1
+constexpr uint32_t REFERENCE_ANNOTATIONS_MAGIC = 0x314E4E41UL; // ANN1
 
 struct __attribute__((packed)) PackedBlobHeader {
     uint32_t magic;
@@ -27,6 +28,14 @@ struct __attribute__((packed)) PackedBlobHeader {
     uint32_t unpackedCrc32;
 };
 
+struct __attribute__((packed)) ReferenceAnnotationsHeader {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint32_t jsonSize;
+    uint32_t jsonCrc32;
+};
+
 String uint64ToString(uint64_t value) {
     char buffer[24];
     snprintf(buffer, sizeof(buffer), "%llu", static_cast<unsigned long long>(value));
@@ -35,13 +44,78 @@ String uint64ToString(uint64_t value) {
 
 bool validReferenceHeader(const ReferenceFileHeader& header) {
     return header.magic == AppConfig::REFERENCE_MAGIC &&
-           header.version == AppConfig::FILE_FORMAT_VERSION &&
+           header.version >= 3 &&
+           header.version <= AppConfig::FILE_FORMAT_VERSION &&
            header.headerBytes == sizeof(ReferenceFileHeader) &&
            header.pinCount == AppConfig::PIN_COUNT &&
            header.rowBytes == AppConfig::ROW_BYTES &&
            header.matrixBytes >= sizeof(PackedBlobHeader) &&
            header.matrixBytes <= AppConfig::MATRIX_BYTES &&
            header.createdAtEpochMs >= 946684800000ULL;
+}
+
+bool readReferenceAnnotations(File& file,
+                              size_t annotationOffset,
+                              size_t fileSize,
+                              String* annotationsJson,
+                              String& error) {
+    if (annotationOffset == fileSize) {
+        if (annotationsJson != nullptr) annotationsJson->remove(0);
+        return true;
+    }
+
+    if (fileSize < annotationOffset + sizeof(ReferenceAnnotationsHeader)) {
+        error = "Reference annotations header is truncated";
+        return false;
+    }
+
+    if (!file.seek(annotationOffset)) {
+        error = "Reference annotations seek failed";
+        return false;
+    }
+
+    ReferenceAnnotationsHeader header {};
+    if (file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) != sizeof(header)) {
+        error = "Reference annotations header read failed";
+        return false;
+    }
+    if (header.magic != REFERENCE_ANNOTATIONS_MAGIC || header.version != 1U) {
+        error = "Reference annotations header is invalid";
+        return false;
+    }
+
+    const size_t expectedSize = annotationOffset + sizeof(header) + header.jsonSize;
+    if (expectedSize != fileSize) {
+        error = "Reference annotations payload size is invalid";
+        return false;
+    }
+
+    std::unique_ptr<uint8_t[]> payload(new (std::nothrow) uint8_t[header.jsonSize + 1U]);
+    if (!payload) {
+        error = "Not enough memory for reference annotations";
+        return false;
+    }
+    if (header.jsonSize > 0 &&
+        file.read(payload.get(), header.jsonSize) != header.jsonSize) {
+        error = "Reference annotations payload truncated";
+        return false;
+    }
+    payload[header.jsonSize] = '\0';
+
+    const uint32_t crc = StorageManager::crc32(payload.get(), header.jsonSize);
+    if (crc != header.jsonCrc32) {
+        error = "Reference annotations CRC mismatch";
+        return false;
+    }
+
+    if (annotationsJson != nullptr) {
+        annotationsJson->remove(0);
+        if (header.jsonSize > 0) {
+            annotationsJson->reserve(header.jsonSize + 8U);
+            for (uint32_t i = 0; i < header.jsonSize; ++i) *annotationsJson += static_cast<char>(payload[i]);
+        }
+    }
+    return true;
 }
 
 bool packRle(const uint8_t* input,
@@ -752,12 +826,27 @@ bool StorageManager::upsertReferenceMetadataFromFile(const String& fileName, Str
     ReferenceFileHeader header {};
     const bool readable = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) == sizeof(header);
     file.close();
-    const bool valid = readable && validReferenceHeader(header) &&
-                       fileSize == static_cast<size_t>(header.headerBytes) + header.matrixBytes;
+    bool valid = readable && validReferenceHeader(header) &&
+                 fileSize >= static_cast<size_t>(header.headerBytes) + header.matrixBytes;
 
     if (!readable) {
         error = "Reference header read failed";
         return false;
+    }
+    if (valid) {
+        File validationFile = FFat.open(path, FILE_READ);
+        if (!validationFile) {
+            error = "Reference file not found";
+            return false;
+        }
+        String annotationsJson;
+        valid = readReferenceAnnotations(validationFile,
+                                        static_cast<size_t>(header.headerBytes) + header.matrixBytes,
+                                        fileSize,
+                                        &annotationsJson,
+                                        error);
+        validationFile.close();
+        if (!valid) return false;
     }
     return upsertReferenceMetadata(fileName, header, fileSize, valid, error);
 }
@@ -1121,6 +1210,7 @@ bool StorageManager::saveReference(const ReferenceCaptureMetadata& metadata,
 bool StorageManager::loadReference(const String& fileName,
                                    uint8_t* matrix,
                                    ReferenceFileHeader& header,
+                                   String* annotationsJson,
                                    String& error) {
     if (!safeFileName(fileName) || !fileName.endsWith(".ref")) {
         error = "Invalid reference file name";
@@ -1133,6 +1223,7 @@ bool StorageManager::loadReference(const String& fileName,
         error = "Reference file not found";
         return false;
     }
+    const size_t fileSize = file.size();
 
     if (file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) != sizeof(header)) {
         file.close();
@@ -1140,7 +1231,7 @@ bool StorageManager::loadReference(const String& fileName,
         return false;
     }
     if (!validReferenceHeader(header) ||
-        file.size() != static_cast<size_t>(header.headerBytes) + header.matrixBytes) {
+        fileSize < static_cast<size_t>(header.headerBytes) + header.matrixBytes) {
         file.close();
         error = "Invalid reference format";
         return false;
@@ -1161,6 +1252,14 @@ bool StorageManager::loadReference(const String& fileName,
     if (file.read(packedBytes.get(), header.matrixBytes) != header.matrixBytes) {
         file.close();
         error = "Reference payload truncated";
+        return false;
+    }
+    if (!readReferenceAnnotations(file,
+                                  static_cast<size_t>(header.headerBytes) + header.matrixBytes,
+                                  fileSize,
+                                  annotationsJson,
+                                  error)) {
+        file.close();
         return false;
     }
     file.close();
@@ -1558,8 +1657,9 @@ bool StorageManager::validateReferenceFile(const String& path, String& error) {
         error = "Reference header read failed";
         return false;
     }
+    const size_t fileSize = file.size();
     if (!validReferenceHeader(header) ||
-        file.size() != static_cast<size_t>(header.headerBytes) + header.matrixBytes) {
+        fileSize < static_cast<size_t>(header.headerBytes) + header.matrixBytes) {
         file.close();
         error = "Invalid reference file format";
         return false;
@@ -1580,6 +1680,15 @@ bool StorageManager::validateReferenceFile(const String& path, String& error) {
     if (file.read(packedBytes.get(), header.matrixBytes) != header.matrixBytes) {
         file.close();
         error = "Reference payload truncated";
+        return false;
+    }
+    String annotationsJson;
+    if (!readReferenceAnnotations(file,
+                                  static_cast<size_t>(header.headerBytes) + header.matrixBytes,
+                                  fileSize,
+                                  &annotationsJson,
+                                  error)) {
+        file.close();
         return false;
     }
     file.close();

@@ -23,7 +23,7 @@
       <div class="admin-hero">
         <div class="admin-hero-box">
           <h2>Админ-режим в браузере</h2>
-          <p>Эта страница собрана только для работы с эталонами. Здесь можно создать новый эталон, загрузить файл в устройство и удалить старые записи без лишних блоков проверки кабеля.</p>
+          <p>Здесь можно создавать эталоны, импортировать их из CSV, загружать файлы в устройство и редактировать уже сохранённые эталоны.</p>
           <div class="admin-actions">
             <a class="button-link secondary-link" href="/">К странице проверки</a>
             <button id="refreshAdminButton" class="secondary" type="button">Обновить</button>
@@ -49,7 +49,7 @@
       <div class="card-head">
         <div>
           <h2>Создать эталон v3</h2>
-          <p>Дата и время будут взяты из браузера автоматически. Эталон сохранится как единый файл <code>.ref</code>.</p>
+          <p>Дата и время берутся автоматически. Эталон сохраняется как один файл <code>.ref</code>.</p>
         </div>
       </div>
       <div class="form-grid">
@@ -108,24 +108,54 @@
       <div class="card-head">
         <div>
           <h2>Ручной конструктор эталона</h2>
-          <p>Контакты нумеруются от <code>1</code> до <code>1024</code>. Выберите два контакта кликом по полю или введите их вручную, чтобы добавить ожидаемую связь.</p>
+          <p>Для каждой связи задаются жгут и контакт в жгуте для обоих концов. Внутренние каналы прибора <code>1..1024</code> хранятся отдельно и нужны для матрицы тестера.</p>
         </div>
       </div>
       <div class="manual-editor-layout">
         <div class="manual-editor-panel">
           <div class="form-grid">
             <label>
-              Контакт A
+              Канал прибора A
               <input id="manualContactA" type="number" min="1" max="1024" step="1" placeholder="1..1024">
             </label>
             <label>
-              Контакт B
+              Канал прибора B
               <input id="manualContactB" type="number" min="1" max="1024" step="1" placeholder="1..1024">
+            </label>
+            <label>
+              Провод
+              <input id="manualWireName" type="text" maxlength="63" placeholder="Например: 1 или W-01">
+            </label>
+            <label>
+              Жгут A
+              <input id="manualMarkA" type="text" maxlength="31" placeholder="Например: X15">
+            </label>
+            <label>
+              Контакт в жгуте A
+              <input id="manualLocalPinA" type="text" maxlength="31" placeholder="Например: 3">
+            </label>
+            <label>
+              Жгут B
+              <input id="manualMarkB" type="text" maxlength="31" placeholder="Например: X20">
+            </label>
+            <label>
+              Контакт в жгуте B
+              <input id="manualLocalPinB" type="text" maxlength="31" placeholder="Например: 30">
+            </label>
+            <label class="span-two">
+              Примечание
+              <input id="manualNote" type="text" maxlength="127" placeholder="Необязательно">
             </label>
           </div>
           <div class="admin-actions">
             <button id="addManualPairButton" class="secondary" type="button">Добавить связь</button>
             <button id="clearManualPairsButton" class="secondary" type="button">Очистить всё</button>
+          </div>
+          <div class="upload-box manual-import-box">
+            <h3>Импорт из CSV</h3>
+            <input id="manualCsvInput" type="file" accept=".csv,text/csv,text/plain">
+            <button id="manualCsvImportButton" class="secondary" type="button">Импортировать CSV</button>
+            <small>Формат CSV: Провод, Позиция, Маркировка, Контакт, Маркировка, Контакт, Примечание. Поля Маркировка — это обозначения жгутов/разъёмов, а Контакт — номер внутри жгута.</small>
           </div>
           <div id="manualEditorStatus" class="message">Пока связей нет. Выберите два контакта, чтобы добавить первую пару.</div>
           <div class="manual-pair-list-wrap">
@@ -139,9 +169,12 @@
             <span><i class="manual-dot selected"></i> выбран сейчас</span>
             <span><i class="manual-dot active"></i> подсвеченная пара</span>
           </div>
-          <div id="manualHoverInfo" class="message">Наведите курсор на ячейку, чтобы увидеть номер контакта.</div>
-          <div class="matrix-wrap">
-            <canvas id="manualMatrixCanvas" width="640" height="640"></canvas>
+          <div id="manualHoverInfo" class="message">Выберите два контакта в блоках, чтобы добавить связь.</div>
+          <div id="manualGuideLegend" class="reference-guide-legend">
+            <div class="empty">Легенда жгутов появится после добавления связей.</div>
+          </div>
+          <div id="manualGuideGrid" class="reference-guide-grid admin-guide-grid">
+            <div class="empty">Блоки контактов пока пусты.</div>
           </div>
         </div>
       </div>
@@ -151,7 +184,7 @@
       <div class="card-head">
         <div>
           <h2>Загрузка файлов в устройство</h2>
-          <p>Можно загрузить эталон <code>.ref</code> или отчет <code>.json</code> прямо из браузера.</p>
+          <p>Можно загрузить эталон <code>.ref</code> или отчёт <code>.json</code> прямо из браузера.</p>
         </div>
       </div>
       <div class="upload-grid">
@@ -163,9 +196,9 @@
           <small id="referenceUploadText">Файл не выбран</small>
         </div>
         <div class="upload-box">
-          <h3>Загрузить отчет</h3>
+          <h3>Загрузить отчёт</h3>
           <input id="calculationUploadInput" type="file" accept=".json,application/json,application/octet-stream">
-          <button id="calculationUploadButton" class="secondary" type="button">Загрузить отчет</button>
+          <button id="calculationUploadButton" class="secondary" type="button">Загрузить отчёт</button>
           <div class="upload-progress"><div id="calculationUploadBar"></div></div>
           <small id="calculationUploadText">Файл не выбран</small>
         </div>

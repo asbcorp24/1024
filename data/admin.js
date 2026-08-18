@@ -10,6 +10,7 @@ let activeManualPairKey = "";
 let hoveredManualPin = null;
 let editingReferenceFile = "";
 let editingReferenceName = "";
+let currentPreviewFile = "";
 
 const REFERENCE_PAGE_SIZE = 20;
 const HISTORY_LIMIT = 20;
@@ -21,11 +22,13 @@ const ROW_BYTES = PIN_COUNT / 8;
 const MATRIX_BYTES = PIN_COUNT * ROW_BYTES;
 const REFERENCE_MAGIC = 0x31464243;
 const FILE_FORMAT_VERSION = 3;
-const PACKED_BLOB_MAGIC = 0x314B4350;
+const PACKED_BLOB_MAGIC = 0x314b4350;
+const REFERENCE_ANNOTATIONS_MAGIC = 0x314e4e41;
 const REFERENCE_HEADER_BYTES = 756;
 
 function toast(message) {
   const el = $("toast");
+  if (!el) return;
   el.textContent = message;
   el.hidden = false;
   clearTimeout(toast.timer);
@@ -34,19 +37,17 @@ function toast(message) {
   }, 4200);
 }
 
-function api(url, options = {}) {
-  return fetch(url, { cache: "no-store", ...options })
-    .then(async (response) => {
-      const text = await response.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = text;
-      }
-      if (!response.ok) throw new Error(data?.error || text || `HTTP ${response.status}`);
-      return data;
-    });
+async function api(url, options = {}) {
+  const response = await fetch(url, { cache: "no-store", ...options });
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = text;
+  }
+  if (!response.ok) throw new Error(data?.error || text || `HTTP ${response.status}`);
+  return data;
 }
 
 function escapeHtml(value) {
@@ -75,6 +76,11 @@ function contactLabel(pinZeroBased) {
   return `Контакт ${Number(pinZeroBased) + 1}`;
 }
 
+function logicalPinText(value) {
+  const text = String(value ?? "").trim();
+  return text.slice(0, 31);
+}
+
 function parseContactValue(value) {
   const numeric = Number(value);
   if (!Number.isInteger(numeric) || numeric < 1 || numeric > PIN_COUNT) return null;
@@ -85,6 +91,88 @@ function pairKey(a, b) {
   const left = Math.min(a, b);
   const right = Math.max(a, b);
   return `${left}:${right}`;
+}
+
+function normalizeShortText(value, maxLength) {
+  return String(value ?? "").trim().slice(0, maxLength);
+}
+
+function stringHash(value) {
+  let hash = 0;
+  const text = String(value ?? "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function harnessColor(mark) {
+  const text = String(mark ?? "").trim();
+  if (!text) {
+    return {
+      bg: "#dbeafe",
+      border: "#60a5fa",
+      pin: "#1d4ed8",
+      text: "#1e3a8a",
+      meta: "#334155"
+    };
+  }
+
+  const hue = stringHash(text) % 360;
+  return {
+    bg: `hsl(${hue} 88% 86%)`,
+    border: `hsl(${hue} 70% 58%)`,
+    pin: `hsl(${hue} 82% 28%)`,
+    text: `hsl(${hue} 58% 18%)`,
+    meta: `hsl(${hue} 34% 30%)`
+  };
+}
+
+function makeManualPair(a, b, metadata = {}) {
+  const left = Math.min(Number(a), Number(b));
+  const right = Math.max(Number(a), Number(b));
+  const leftIsOriginalA = Number(a) === left;
+  return {
+    a: left,
+    b: right,
+    key: pairKey(left, right),
+    wireName: normalizeShortText(metadata.wireName, 63),
+    markA: normalizeShortText(leftIsOriginalA ? metadata.markA : metadata.markB, 31),
+    localPinA: logicalPinText(leftIsOriginalA ? metadata.localPinA : metadata.localPinB),
+    markB: normalizeShortText(leftIsOriginalA ? metadata.markB : metadata.markA, 31),
+    localPinB: logicalPinText(leftIsOriginalA ? metadata.localPinB : metadata.localPinA),
+    note: normalizeShortText(metadata.note, 127)
+  };
+}
+
+function pairEndpointText(mark, logicalPin, physicalPin) {
+  const markText = normalizeShortText(mark, 31);
+  const logicalText = logicalPinText(logicalPin);
+  if (markText && logicalText) return `${markText}/${logicalText}`;
+  if (markText) return `${markText}/${Number(physicalPin) + 1}`;
+  if (logicalText) return logicalText;
+  return contactLabel(physicalPin);
+}
+
+function pairDisplayText(pair) {
+  const left = pairEndpointText(pair.markA, pair.localPinA, pair.a);
+  const right = pairEndpointText(pair.markB, pair.localPinB, pair.b);
+  const wire = pair.wireName ? `Провод ${pair.wireName}` : "Связь";
+  return `${wire}: ${left} ↔ ${right}`;
+}
+
+function pairMetadataText(pair) {
+  const items = [];
+  if (pair.wireName) items.push(`провод ${pair.wireName}`);
+  if (pair.markA || pair.localPinA) items.push(`A=${pairEndpointText(pair.markA, pair.localPinA, pair.a)}`);
+  if (pair.markB || pair.localPinB) items.push(`B=${pairEndpointText(pair.markB, pair.localPinB, pair.b)}`);
+  items.push(`каналы=${Number(pair.a) + 1}↔${Number(pair.b) + 1}`);
+  if (pair.note) items.push(`примечание: ${pair.note}`);
+  return items.join(", ");
+}
+
+function selectedManualPair() {
+  return manualConnections.find((pair) => pair.key === activeManualPairKey) || null;
 }
 
 function approvalStatusLabel(value) {
@@ -150,271 +238,41 @@ function primeSuggestionsFromReferences(records) {
   }
 }
 
-function manualPairIndex(a, b) {
-  const key = pairKey(a, b);
-  return manualConnections.findIndex((pair) => pair.key === key);
-}
-
-function renderManualStatus() {
-  const status = $("manualEditorStatus");
-  if (!status) return;
-
-  if (!manualConnections.length) {
-    status.textContent = selectedManualPins.length === 1
-      ? `Выбран ${contactLabel(selectedManualPins[0])}. Выберите второй контакт для добавления связи.`
-      : "Пока связей нет. Выберите два контакта, чтобы добавить первую пару.";
-    return;
-  }
-
-  const selectedText = selectedManualPins.length === 1
-    ? ` Сейчас выбран ${contactLabel(selectedManualPins[0])}.`
-    : "";
-  status.textContent = `Добавлено связей: ${manualConnections.length}.${selectedText}`;
-}
-
-function renderEditingState() {
-  const target = $("manualEditingState");
-  if (!target) return;
-  target.textContent = editingReferenceFile
-    ? `Открыт эталон для редактирования: ${editingReferenceName || editingReferenceFile}. При сохранении можно перезаписать его или создать новый файл.`
-    : "Сейчас открыт режим создания нового ручного эталона.";
-}
-
-function renderManualPairList() {
-  const target = $("manualPairList");
-  if (!target) return;
-
-  if (!manualConnections.length) {
-    target.className = "empty";
-    target.textContent = "Список связей пока пуст.";
-    return;
-  }
-
-  target.className = "manual-pair-list";
-  target.innerHTML = manualConnections.map((pair, index) => `
-    <div class="manual-pair-item ${pair.key === activeManualPairKey ? "active" : ""}" data-manual-pair="${pair.key}">
-      <div><strong>Связь ${index + 1}</strong><br>${escapeHtml(contactLabel(pair.a))} ↔ ${escapeHtml(contactLabel(pair.b))}</div>
-      <button type="button" data-delete-manual-pair="${pair.key}">Удалить</button>
-    </div>
-  `).join("");
-
-  target.querySelectorAll("[data-manual-pair]").forEach((item) => {
-    item.addEventListener("click", (event) => {
-      if (event.target instanceof HTMLElement && event.target.closest("[data-delete-manual-pair]")) return;
-      activeManualPairKey = item.dataset.manualPair || "";
-      renderManualPairList();
-      renderManualMatrixCanvas();
-    });
-  });
-
-  target.querySelectorAll("[data-delete-manual-pair]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      manualConnections = manualConnections.filter((pair) => pair.key !== button.dataset.deleteManualPair);
-      if (activeManualPairKey === button.dataset.deleteManualPair) activeManualPairKey = "";
-      renderManualEditor();
-    });
-  });
-}
-
-function renderManualMatrixCanvas() {
-  const canvas = $("manualMatrixCanvas");
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const scale = canvas.width / MATRIX_SIDE;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  const usedPins = new Set();
-  for (const pair of manualConnections) {
-    usedPins.add(pair.a);
-    usedPins.add(pair.b);
-  }
-
-  let activePins = [];
-  if (activeManualPairKey) {
-    const activePair = manualConnections.find((pair) => pair.key === activeManualPairKey);
-    if (activePair) activePins = [activePair.a, activePair.b];
-  }
-
-  for (let pin = 0; pin < PIN_COUNT; ++pin) {
-    const row = Math.floor(pin / MATRIX_SIDE);
-    const col = pin % MATRIX_SIDE;
-    const x = col * scale;
-    const y = row * scale;
-
-    let fill = "#d9e1ed";
-    if (usedPins.has(pin)) fill = "#1f7a3f";
-    if (activePins.includes(pin)) fill = "#1f6fd6";
-    if (selectedManualPins.includes(pin)) fill = "#d98d00";
-    if (hoveredManualPin === pin) fill = "#7f8fa6";
-
-    ctx.fillStyle = fill;
-    ctx.fillRect(x + 1, y + 1, scale - 2, scale - 2);
-  }
-
-  ctx.strokeStyle = "rgba(28, 39, 58, 0.14)";
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= MATRIX_SIDE; ++i) {
-    const offset = i * scale;
-    ctx.beginPath();
-    ctx.moveTo(offset, 0);
-    ctx.lineTo(offset, canvas.height);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(0, offset);
-    ctx.lineTo(canvas.width, offset);
-    ctx.stroke();
-  }
-}
-
-function updateManualHoverInfo(pin) {
-  const target = $("manualHoverInfo");
-  if (!target) return;
-  if (!Number.isInteger(pin) || pin < 0 || pin >= PIN_COUNT) {
-    target.textContent = "Наведите курсор на ячейку, чтобы увидеть номер контакта.";
-    return;
-  }
-
-  const pairCount = manualConnections.filter((pair) => pair.a === pin || pair.b === pin).length;
-  target.textContent = pairCount > 0
-    ? `${contactLabel(pin)} · участвует в ${pairCount} ${pairCount === 1 ? "связи" : pairCount < 5 ? "связях" : "связях"}`
-    : `${contactLabel(pin)} · пока не используется`;
-}
-
-function renderManualEditor() {
-  renderManualStatus();
-  renderEditingState();
-  renderManualPairList();
-  renderManualMatrixCanvas();
-}
-
-function addManualPair(a, b) {
-  if (!Number.isInteger(a) || !Number.isInteger(b)) throw new Error("Укажите оба контакта.");
-  if (a < 0 || a >= PIN_COUNT || b < 0 || b >= PIN_COUNT) throw new Error("Контакты должны быть в диапазоне 1..1024.");
-  if (a === b) throw new Error("Нельзя соединить контакт сам с собой.");
-  if (manualPairIndex(a, b) >= 0) throw new Error("Такая связь уже добавлена.");
-
-  const normalized = { a: Math.min(a, b), b: Math.max(a, b) };
-  manualConnections.push({ ...normalized, key: pairKey(normalized.a, normalized.b) });
-  manualConnections.sort((left, right) => (left.a - right.a) || (left.b - right.b));
-  activeManualPairKey = pairKey(normalized.a, normalized.b);
-  selectedManualPins = [];
-  if ($("manualContactA")) $("manualContactA").value = "";
-  if ($("manualContactB")) $("manualContactB").value = "";
-  renderManualEditor();
-}
-
-function handleManualCanvasClick(event) {
-  const canvas = $("manualMatrixCanvas");
-  if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const x = (event.clientX - rect.left) * scaleX;
-  const y = (event.clientY - rect.top) * scaleY;
-  const col = Math.max(0, Math.min(MATRIX_SIDE - 1, Math.floor(x / (canvas.width / MATRIX_SIDE))));
-  const row = Math.max(0, Math.min(MATRIX_SIDE - 1, Math.floor(y / (canvas.height / MATRIX_SIDE))));
-  const pin = row * MATRIX_SIDE + col;
-
-  if (selectedManualPins.length === 1 && selectedManualPins[0] === pin) {
-    selectedManualPins = [];
-    renderManualEditor();
-    return;
-  }
-
-  if (!selectedManualPins.length) {
-    selectedManualPins = [pin];
-    if ($("manualContactA")) $("manualContactA").value = String(pin + 1);
-    renderManualEditor();
-    return;
-  }
-
-  try {
-    if ($("manualContactB")) $("manualContactB").value = String(pin + 1);
-    addManualPair(selectedManualPins[0], pin);
-  } catch (error) {
-    selectedManualPins = [];
-    toast(error.message);
-    renderManualEditor();
-  }
-}
-
-function manualPinFromEvent(event) {
-  const canvas = $("manualMatrixCanvas");
-  if (!canvas) return null;
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return null;
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const x = (event.clientX - rect.left) * scaleX;
-  const y = (event.clientY - rect.top) * scaleY;
-  if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return null;
-  const col = Math.max(0, Math.min(MATRIX_SIDE - 1, Math.floor(x / (canvas.width / MATRIX_SIDE))));
-  const row = Math.max(0, Math.min(MATRIX_SIDE - 1, Math.floor(y / (canvas.height / MATRIX_SIDE))));
-  return row * MATRIX_SIDE + col;
-}
-
-function handleManualCanvasMove(event) {
-  const pin = manualPinFromEvent(event);
-  if (hoveredManualPin === pin) return;
-  hoveredManualPin = pin;
-  updateManualHoverInfo(pin);
-  renderManualMatrixCanvas();
-}
-
-function handleManualCanvasLeave() {
-  if (hoveredManualPin === null) return;
-  hoveredManualPin = null;
-  updateManualHoverInfo(null);
-  renderManualMatrixCanvas();
-}
-
-function browserTimeParams() {
-  const now = new Date();
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Browser/Local";
-  return new URLSearchParams({
-    epochMs: String(now.getTime()),
-    offsetMinutes: String(-now.getTimezoneOffset()),
-    timeZone
-  });
-}
-
 function browserTimeObject() {
-  const now = new Date();
   return {
-    epochMs: now.getTime(),
-    offsetMinutes: -now.getTimezoneOffset(),
-    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Browser/Local"
+    epochMs: Date.now(),
+    offsetMinutes: -new Date().getTimezoneOffset(),
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
   };
 }
 
-function encodeFixedString(value, maxBytes) {
-  const encoder = new TextEncoder();
-  const result = [];
-  for (const char of String(value ?? "")) {
-    const chunk = encoder.encode(char);
-    if (result.length + chunk.length >= maxBytes) break;
-    result.push(...chunk);
-  }
-  return new Uint8Array(result);
+function browserTimeParams() {
+  const params = new URLSearchParams();
+  const time = browserTimeObject();
+  params.set("epochMs", String(time.epochMs));
+  params.set("offsetMinutes", String(time.offsetMinutes));
+  params.set("timeZone", time.timeZone);
+  return params;
+}
+
+function parseMappingCrcValue() {
+  const value = $("mappingCrc32")?.value.trim() || "";
+  if (!value) return 0;
+  const normalized = value.replace(/^0x/i, "");
+  if (!/^[0-9a-f]{1,8}$/i.test(normalized)) throw new Error("CRC32 должен содержать до 8 hex-символов.");
+  return Number.parseInt(normalized, 16) >>> 0;
+}
+
+function encodeFixedString(value, size) {
+  const bytes = new Uint8Array(size);
+  const encoded = new TextEncoder().encode(String(value ?? ""));
+  bytes.set(encoded.slice(0, Math.max(0, size - 1)));
+  return bytes;
 }
 
 function writeFixedString(view, offset, size, value) {
   const bytes = encodeFixedString(value, size);
-  for (let i = 0; i < size; ++i) view.setUint8(offset + i, 0);
-  bytes.forEach((byte, index) => view.setUint8(offset + index, byte));
-}
-
-function parseMappingCrcValue() {
-  const text = $("mappingCrc32").value.trim();
-  if (!text) return 0;
-  const normalized = text.replace(/^0x/i, "");
-  if (!/^[0-9a-f]{1,8}$/i.test(normalized)) throw new Error("CRC32 должен содержать до 8 hex-символов.");
-  return Number.parseInt(normalized, 16) >>> 0;
+  for (let i = 0; i < size; i += 1) view.setUint8(offset + i, bytes[i]);
 }
 
 function sanitizeReferenceFileBase(value) {
@@ -430,11 +288,9 @@ function sanitizeReferenceFileBase(value) {
 
 function makeCrc32Table() {
   const table = new Uint32Array(256);
-  for (let n = 0; n < 256; ++n) {
+  for (let n = 0; n < 256; n += 1) {
     let c = n;
-    for (let k = 0; k < 8; ++k) {
-      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    }
+    for (let k = 0; k < 8; k += 1) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
     table[n] = c >>> 0;
   }
   return table;
@@ -443,10 +299,8 @@ function makeCrc32Table() {
 const CRC32_TABLE = makeCrc32Table();
 
 function crc32(bytes) {
-  let crc = 0xFFFFFFFF;
-  for (const byte of bytes) {
-    crc = CRC32_TABLE[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
-  }
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
   return (~crc) >>> 0;
 }
 
@@ -455,10 +309,7 @@ function packRle(bytes) {
   let src = 0;
   while (src < bytes.length) {
     let runLength = 1;
-    while (src + runLength < bytes.length && bytes[src + runLength] === bytes[src] && runLength < 128) {
-      runLength += 1;
-    }
-
+    while (src + runLength < bytes.length && bytes[src + runLength] === bytes[src] && runLength < 128) runLength += 1;
     if (runLength >= 4) {
       output.push(0x80 | (runLength - 1), bytes[src]);
       src += runLength;
@@ -469,17 +320,14 @@ function packRle(bytes) {
     let literalLength = 0;
     while (src < bytes.length && literalLength < 128) {
       runLength = 1;
-      while (src + runLength < bytes.length && bytes[src + runLength] === bytes[src] && runLength < 128) {
-        runLength += 1;
-      }
+      while (src + runLength < bytes.length && bytes[src + runLength] === bytes[src] && runLength < 128) runLength += 1;
       if (runLength >= 4 && literalLength > 0) break;
       src += runLength >= 4 ? 0 : 1;
       literalLength += 1;
       if (runLength >= 4) break;
     }
-
     output.push(literalLength - 1);
-    for (let i = 0; i < literalLength; ++i) output.push(bytes[literalStart + i]);
+    for (let i = 0; i < literalLength; i += 1) output.push(bytes[literalStart + i]);
     src = literalStart + literalLength;
   }
   return new Uint8Array(output);
@@ -515,7 +363,6 @@ function buildPackedPayload(matrixBytes, matrixCrc) {
 function buildReferenceHeader(metadata, time, packedPayloadSize, matrixCrc) {
   const buffer = new ArrayBuffer(REFERENCE_HEADER_BYTES);
   const view = new DataView(buffer);
-
   view.setUint32(0, REFERENCE_MAGIC, true);
   view.setUint16(4, FILE_FORMAT_VERSION, true);
   view.setUint16(6, REFERENCE_HEADER_BYTES, true);
@@ -548,17 +395,37 @@ function buildReferenceHeader(metadata, time, packedPayloadSize, matrixCrc) {
   return new Uint8Array(buffer);
 }
 
+function buildAnnotationsPayload() {
+  const annotations = {
+    version: 1,
+    connections: manualConnections.map((pair) => ({
+      a: pair.a,
+      b: pair.b,
+      wireName: pair.wireName || "",
+      markA: pair.markA || "",
+      localPinA: pair.localPinA || "",
+      markB: pair.markB || "",
+      localPinB: pair.localPinB || "",
+      note: pair.note || ""
+    }))
+  };
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(annotations.connections));
+  const payload = new Uint8Array(16 + jsonBytes.length);
+  const view = new DataView(payload.buffer);
+  view.setUint32(0, REFERENCE_ANNOTATIONS_MAGIC, true);
+  view.setUint16(4, 1, true);
+  view.setUint16(6, 0, true);
+  view.setUint32(8, jsonBytes.length, true);
+  view.setUint32(12, crc32(jsonBytes), true);
+  payload.set(jsonBytes, 16);
+  return payload;
+}
+
 async function uploadGeneratedReference(fileName, fileBytes) {
   const form = new FormData();
   const blob = new Blob([fileBytes], { type: "application/octet-stream" });
   form.append("file", blob, fileName);
-
-  const response = await fetch("/api/upload/reference", {
-    method: "POST",
-    body: form,
-    cache: "no-store"
-  });
-
+  const response = await fetch("/api/upload/reference", { method: "POST", body: form, cache: "no-store" });
   const text = await response.text();
   let data;
   try {
@@ -570,35 +437,6 @@ async function uploadGeneratedReference(fileName, fileBytes) {
   return data;
 }
 
-function referenceMetadataParams() {
-  const required = [
-    ["referenceName", "Введите название эталона."],
-    ["cableType", "Введите тип кабельной сборки."],
-    ["revision", "Введите ревизию."],
-    ["deviceId", "Укажите прибор."],
-    ["operatorName", "Укажите оператора."]
-  ];
-  for (const [id, message] of required) {
-    if (!$(id).value.trim()) throw new Error(message);
-  }
-
-  const mappingCrc = $("mappingCrc32").value.trim();
-  if (mappingCrc && !/^(?:0x)?[0-9a-f]{1,8}$/i.test(mappingCrc)) {
-    throw new Error("CRC32 должен содержать до 8 hex-символов.");
-  }
-
-  const params = browserTimeParams();
-  params.set("name", $("referenceName").value.trim());
-  params.set("cableType", $("cableType").value.trim());
-  params.set("revision", $("revision").value.trim());
-  params.set("deviceId", $("deviceId").value.trim());
-  params.set("operator", $("operatorName").value.trim());
-  params.set("mappingCrc32", mappingCrc);
-  params.set("approvalStatus", $("approvalStatus").value);
-  params.set("comment", $("referenceComment").value.trim());
-  return params;
-}
-
 function collectReferenceMetadata() {
   const required = [
     ["referenceName", "Введите название эталона."],
@@ -608,7 +446,7 @@ function collectReferenceMetadata() {
     ["operatorName", "Укажите оператора."]
   ];
   for (const [id, message] of required) {
-    if (!$(id).value.trim()) throw new Error(message);
+    if (!$(id)?.value.trim()) throw new Error(message);
   }
 
   return {
@@ -617,10 +455,24 @@ function collectReferenceMetadata() {
     revision: $("revision").value.trim(),
     deviceId: $("deviceId").value.trim(),
     operatorName: $("operatorName").value.trim(),
-    comment: $("referenceComment").value.trim(),
-    approvalStatus: $("approvalStatus").value,
+    comment: $("referenceComment")?.value.trim() || "",
+    approvalStatus: $("approvalStatus")?.value || "draft",
     mappingCrc32: parseMappingCrcValue()
   };
+}
+
+function referenceMetadataParams() {
+  const metadata = collectReferenceMetadata();
+  const params = browserTimeParams();
+  params.set("name", metadata.name);
+  params.set("cableType", metadata.cableType);
+  params.set("revision", metadata.revision);
+  params.set("deviceId", metadata.deviceId);
+  params.set("operator", metadata.operatorName);
+  params.set("mappingCrc32", metadata.mappingCrc32 ? metadata.mappingCrc32.toString(16).toUpperCase() : "");
+  params.set("approvalStatus", metadata.approvalStatus);
+  params.set("comment", metadata.comment);
+  return params;
 }
 
 function fillMetadataForm(item) {
@@ -632,75 +484,394 @@ function fillMetadataForm(item) {
   if ($("operatorName")) $("operatorName").value = item.operator || "";
   if ($("mappingCrc32")) $("mappingCrc32").value = item.mappingCrc32 ? Number(item.mappingCrc32).toString(16).toUpperCase() : "";
   if ($("approvalStatus")) $("approvalStatus").value = item.approvalStatus || "draft";
+  if ($("referenceComment")) $("referenceComment").value = item.comment || "";
   rememberCurrentMetadata();
 }
 
-async function openReferenceForEditing(fileName) {
-  try {
-    const [item, view] = await Promise.all([
-      Promise.resolve(currentReferences.find((entry) => entry.file === fileName) || null),
-      api(`/api/reference/view?file=${encodeURIComponent(fileName)}`)
-    ]);
-
-    if (item) {
-      fillMetadataForm(item);
-      renderReferencePreview(item);
-      editingReferenceName = item.name || fileName;
-    } else {
-      editingReferenceName = fileName;
-    }
-
-    editingReferenceFile = fileName;
-    manualConnections = (Array.isArray(view?.connections) ? view.connections : [])
-      .map((pair) => ({
-        a: Number(pair.a),
-        b: Number(pair.b),
-        key: pairKey(Number(pair.a), Number(pair.b))
-      }))
-      .filter((pair) => Number.isInteger(pair.a) && Number.isInteger(pair.b) && pair.a >= 0 && pair.b >= 0 && pair.a < PIN_COUNT && pair.b < PIN_COUNT);
-    manualConnections.sort((left, right) => (left.a - right.a) || (left.b - right.b));
-    selectedManualPins = [];
-    activeManualPairKey = "";
-    if ($("manualContactA")) $("manualContactA").value = "";
-    if ($("manualContactB")) $("manualContactB").value = "";
-    renderManualEditor();
-    $("saveManualReferenceButton")?.scrollIntoView({ behavior: "smooth", block: "center" });
-    toast(`Эталон открыт для редактирования: ${editingReferenceName}`);
-  } catch (error) {
-    toast(error.message);
-  }
+function fillManualPairInputs(pair) {
+  if ($("manualContactA")) $("manualContactA").value = pair ? String(pair.a + 1) : "";
+  if ($("manualContactB")) $("manualContactB").value = pair ? String(pair.b + 1) : "";
+  if ($("manualWireName")) $("manualWireName").value = pair?.wireName || "";
+  if ($("manualMarkA")) $("manualMarkA").value = pair?.markA || "";
+  if ($("manualLocalPinA")) $("manualLocalPinA").value = pair?.localPinA || "";
+  if ($("manualMarkB")) $("manualMarkB").value = pair?.markB || "";
+  if ($("manualLocalPinB")) $("manualLocalPinB").value = pair?.localPinB || "";
+  if ($("manualNote")) $("manualNote").value = pair?.note || "";
 }
 
-async function saveManualReference() {
-  if (!serviceUnlockEnabled) return toast(serviceUnlockMessage());
-  if (!manualConnections.length) return toast("Добавьте хотя бы одну связь в ручной эталон.");
+function renderManualStatus() {
+  const status = $("manualEditorStatus");
+  if (!status) return;
+  if (!manualConnections.length) {
+    status.textContent = selectedManualPins.length === 1
+      ? `Выбран ${contactLabel(selectedManualPins[0])}. Выберите второй контакт для добавления связи.`
+      : "Пока связей нет. Выберите два контакта, чтобы добавить первую пару.";
+    return;
+  }
+  const activePair = selectedManualPair();
+  status.textContent = activePair
+    ? `Добавлено связей: ${manualConnections.length}. Открыта пара: ${pairDisplayText(activePair)}.`
+    : `Добавлено связей: ${manualConnections.length}.`;
+}
 
-  try {
-    const metadata = collectReferenceMetadata();
-    const time = browserTimeObject();
-    rememberCurrentMetadata();
+function renderEditingState() {
+  const target = $("manualEditingState");
+  if (!target) return;
+  target.textContent = editingReferenceFile
+    ? `Открыт эталон для редактирования: ${editingReferenceName || editingReferenceFile}. При сохранении можно перезаписать его или создать новый файл.`
+    : "Сейчас открыт режим создания нового ручного эталона.";
+}
 
-    const matrixBytes = buildManualMatrixBytes();
-    const matrixCrc = crc32(matrixBytes);
-    const packedPayload = buildPackedPayload(matrixBytes, matrixCrc);
-    const header = buildReferenceHeader(metadata, time, packedPayload.length, matrixCrc);
-    const fileBytes = new Uint8Array(header.length + packedPayload.length);
-    fileBytes.set(header, 0);
-    fileBytes.set(packedPayload, header.length);
+function renderManualPairList() {
+  const target = $("manualPairList");
+  if (!target) return;
+  if (!manualConnections.length) {
+    target.className = "empty";
+    target.textContent = "Список связей пока пуст.";
+    return;
+  }
 
-    let fileName = `${sanitizeReferenceFileBase(metadata.name)}.ref`;
-    if (editingReferenceFile) {
-      const overwrite = confirm(
-        `Перезаписать открытый эталон ${editingReferenceName || editingReferenceFile}?\n\nНажмите OK для перезаписи.\nНажмите Отмена, чтобы сохранить как новый файл.`
-      );
-      if (overwrite) fileName = editingReferenceFile;
+  target.className = "manual-pair-list";
+  target.innerHTML = manualConnections.map((pair, index) => `
+    <div class="manual-pair-item ${pair.key === activeManualPairKey ? "active" : ""}" data-manual-pair="${pair.key}">
+      <div>
+        <strong>Связь ${index + 1}</strong><br>
+        ${escapeHtml(pairDisplayText(pair))}
+        <div class="manual-pair-meta">${escapeHtml(pairMetadataText(pair) || "без дополнительной маркировки")}</div>
+      </div>
+      <button type="button" data-delete-manual-pair="${pair.key}">Удалить</button>
+    </div>
+  `).join("");
+
+  target.querySelectorAll("[data-manual-pair]").forEach((item) => {
+    item.addEventListener("click", (event) => {
+      if (event.target instanceof HTMLElement && event.target.closest("[data-delete-manual-pair]")) return;
+      setActiveManualPair(item.dataset.manualPair || "");
+    });
+  });
+
+  target.querySelectorAll("[data-delete-manual-pair]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      manualConnections = manualConnections.filter((pair) => pair.key !== button.dataset.deleteManualPair);
+      if (activeManualPairKey === button.dataset.deleteManualPair) activeManualPairKey = "";
+      renderManualEditor();
+    });
+  });
+}
+
+function buildManualGuideAssignments() {
+  const assignments = new Map();
+
+  const addEndpoint = (pin, mark, localPin, wireName, note) => {
+    const physicalPin = Number(pin);
+    if (!Number.isInteger(physicalPin) || physicalPin < 0 || physicalPin >= PIN_COUNT) return;
+    const normalizedMark = String(mark ?? "").trim();
+    const endpoint = pairEndpointText(mark, localPin, physicalPin);
+    const metaParts = [];
+    if (wireName) metaParts.push(`провод ${wireName}`);
+    if (note) metaParts.push(note);
+    const meta = metaParts.join(" · ");
+    if (!assignments.has(physicalPin)) {
+      assignments.set(physicalPin, {
+        pin: physicalPin,
+        mark: normalizedMark,
+        endpoint,
+        metas: meta ? new Set([meta]) : new Set()
+      });
+      return;
     }
-    const response = await uploadGeneratedReference(fileName, fileBytes);
-    editingReferenceFile = response.file || fileName;
-    editingReferenceName = metadata.name;
+    const existing = assignments.get(physicalPin);
+    if (!existing.mark && normalizedMark) existing.mark = normalizedMark;
+    if (existing.endpoint !== endpoint) existing.endpoint = `${existing.endpoint} / ${endpoint}`;
+    if (meta) existing.metas.add(meta);
+  };
+
+  for (const pair of manualConnections) {
+    addEndpoint(pair.a, pair.markA, pair.localPinA, pair.wireName, pair.note);
+    addEndpoint(pair.b, pair.markB, pair.localPinB, pair.wireName, pair.note);
+  }
+
+  return Array.from(assignments.values()).sort((left, right) => left.pin - right.pin);
+}
+
+function renderManualGuideLegend(assignments) {
+  const legend = $("manualGuideLegend");
+  if (!legend) return;
+  const marks = Array.from(new Set(assignments.map((item) => String(item?.mark || "").trim()).filter(Boolean)))
+    .sort((left, right) => left.localeCompare(right, "ru"));
+  if (!marks.length) {
+    legend.innerHTML = '<div class="empty">Легенда жгутов появится после добавления связей.</div>';
+    return;
+  }
+  legend.innerHTML = marks.map((mark) => {
+    const colors = harnessColor(mark);
+    return `
+      <div class="reference-guide-legend-item">
+        <span class="reference-guide-legend-swatch" style="background:${escapeHtml(colors.bg)};border-color:${escapeHtml(colors.border)};"></span>
+        <span>${escapeHtml(mark)}</span>
+      </div>
+    `;
+  }).join("");
+}
+
+function handleManualPinSelection(pin) {
+  if (selectedManualPins.length && selectedManualPins[0] === pin) {
+    selectedManualPins = [];
     renderManualEditor();
-    toast(`Ручной эталон сохранен: ${response.file || fileName}`);
-    await loadReferences();
+    return;
+  }
+  selectedManualPins = [...selectedManualPins.filter((value) => value !== pin), pin].slice(-2);
+  if (selectedManualPins.length === 2) {
+    const [a, b] = selectedManualPins;
+    if (a !== b) {
+      addOrReplaceManualPair(a, b, {
+        wireName: $("manualWireName")?.value,
+        markA: $("manualMarkA")?.value,
+        localPinA: $("manualLocalPinA")?.value,
+        markB: $("manualMarkB")?.value,
+        localPinB: $("manualLocalPinB")?.value,
+        note: $("manualNote")?.value
+      });
+    }
+    selectedManualPins = [];
+  }
+  renderManualEditor();
+}
+
+function renderManualGuideGrid() {
+  const grid = $("manualGuideGrid");
+  if (!grid) return;
+
+  const assignments = buildManualGuideAssignments();
+  renderManualGuideLegend(assignments);
+  const activePair = selectedManualPair();
+  const activePins = activePair ? [activePair.a, activePair.b] : [];
+
+  const blocks = Array.from({ length: 16 }, (_, index) => ({ index, items: [] }));
+  for (const item of assignments) {
+    const blockIndex = Math.floor(item.pin / 64);
+    const positionInBlock = (item.pin % 64) + 1;
+    blocks[blockIndex].items.push({ ...item, positionInBlock });
+  }
+
+  grid.innerHTML = blocks.map((block) => {
+    const start = block.index * 64 + 1;
+    const end = start + 63;
+    const itemMap = new Map(block.items.map((item) => [item.positionInBlock, item]));
+    const rows = Array.from({ length: 64 }, (_, positionIndex) => {
+      const position = positionIndex + 1;
+      const pin = block.index * 64 + positionIndex;
+      const item = itemMap.get(position);
+      const colors = harnessColor(item?.mark || "");
+      const selected = selectedManualPins.includes(pin);
+      const active = activePins.includes(pin);
+      return `
+        <div class="reference-guide-cell ${item ? "occupied" : ""} ${selected ? "selected" : ""} ${active ? "focused" : ""}" data-manual-pin="${pin}" style="${item ? `--guide-bg:${colors.bg};--guide-border:${colors.border};--guide-pin:${colors.pin};--guide-text:${colors.text};--guide-meta:${colors.meta};` : ""}" title="${escapeHtml(item ? `${item.endpoint}${item.metas.size ? ` | ${Array.from(item.metas).join(" | ")}` : ""}` : `Позиция ${position} не используется`)}">
+          <div class="reference-guide-cell-pin">${escapeHtml(String(position))}</div>
+          ${item ? `
+            <div class="reference-guide-cell-body">
+              <div class="reference-guide-cell-endpoint">${escapeHtml(item.endpoint)}</div>
+              <div class="reference-guide-cell-meta">${escapeHtml(String(item.pin + 1))}</div>
+            </div>
+          ` : '<div class="reference-guide-cell-empty">—</div>'}
+        </div>
+      `;
+    }).join("");
+    return `
+      <div class="reference-guide-card">
+        <div class="reference-guide-head">
+          <strong>Блок ${escapeHtml(String(block.index + 1))}</strong>
+          <span>Каналы ${escapeHtml(String(start))}–${escapeHtml(String(end))}</span>
+        </div>
+        <div class="reference-guide-body">
+          <div class="reference-guide-panel">${rows}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  grid.querySelectorAll("[data-manual-pin]").forEach((cell) => {
+    cell.addEventListener("click", () => handleManualPinSelection(Number(cell.dataset.manualPin)));
+    cell.addEventListener("mouseenter", () => updateManualHoverInfo(Number(cell.dataset.manualPin)));
+    cell.addEventListener("mouseleave", () => updateManualHoverInfo(null));
+  });
+}
+
+function updateManualHoverInfo(pin) {
+  hoveredManualPin = pin;
+  const target = $("manualHoverInfo");
+  if (!target) return;
+  if (pin === null || pin === undefined) {
+    target.textContent = "Выберите два контакта в блоках, чтобы добавить связь.";
+    return;
+  }
+  const pairCount = manualConnections.filter((pair) => pair.a === pin || pair.b === pin).length;
+  target.textContent = `${contactLabel(pin)}. Связей с этим контактом: ${pairCount}.`;
+}
+
+function renderManualEditor() {
+  renderEditingState();
+  renderManualStatus();
+  renderManualPairList();
+  renderManualGuideGrid();
+  fillManualPairInputs(selectedManualPair());
+}
+
+function persistSelectedManualPairEdits() {
+  const pair = selectedManualPair();
+  if (!pair) return;
+  pair.wireName = normalizeShortText($("manualWireName")?.value, 63);
+  pair.markA = normalizeShortText($("manualMarkA")?.value, 31);
+  pair.localPinA = logicalPinText($("manualLocalPinA")?.value);
+  pair.markB = normalizeShortText($("manualMarkB")?.value, 31);
+  pair.localPinB = logicalPinText($("manualLocalPinB")?.value);
+  pair.note = normalizeShortText($("manualNote")?.value, 127);
+  renderManualPairList();
+  renderManualStatus();
+}
+
+function setActiveManualPair(key) {
+  activeManualPairKey = key || "";
+  renderManualEditor();
+}
+
+function addOrReplaceManualPair(a, b, metadata = {}) {
+  const normalized = makeManualPair(a, b, metadata);
+  const index = manualConnections.findIndex((pair) => pair.key === normalized.key);
+  if (index >= 0) manualConnections[index] = normalized;
+  else manualConnections.push(normalized);
+  manualConnections.sort((left, right) => (left.a - right.a) || (left.b - right.b));
+  activeManualPairKey = normalized.key;
+}
+
+function addManualPairFromInputs() {
+  const a = parseContactValue($("manualContactA")?.value);
+  const b = parseContactValue($("manualContactB")?.value);
+  if (a === null || b === null) return toast("Укажите оба контакта от 1 до 1024.");
+  if (a === b) return toast("Нельзя соединить контакт сам с собой.");
+  addOrReplaceManualPair(a, b, {
+    wireName: $("manualWireName")?.value,
+    markA: $("manualMarkA")?.value,
+    localPinA: $("manualLocalPinA")?.value,
+    markB: $("manualMarkB")?.value,
+    localPinB: $("manualLocalPinB")?.value,
+    note: $("manualNote")?.value
+  });
+  selectedManualPins = [];
+  renderManualEditor();
+}
+
+function parseDelimitedRow(line, delimiter) {
+  const cells = [];
+  let current = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (char === '"') {
+      if (quoted && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        quoted = !quoted;
+      }
+      continue;
+    }
+    if (!quoted && char === delimiter) {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function detectDelimiter(text) {
+  const firstLine = text.split(/\r?\n/).find((line) => line.trim()) || "";
+  const tabCount = (firstLine.match(/\t/g) || []).length;
+  const semicolonCount = (firstLine.match(/;/g) || []).length;
+  const commaCount = (firstLine.match(/,/g) || []).length;
+  if (tabCount >= semicolonCount && tabCount >= commaCount && tabCount > 0) return "\t";
+  if (semicolonCount >= commaCount && semicolonCount > 0) return ";";
+  return ",";
+}
+
+function csvHeaderLike(value) {
+  return ["провод", "позиция", "маркировка", "контакт", "примечание"].includes(String(value || "").trim().toLowerCase());
+}
+
+function allocateVirtualContact(endpointKey, endpointMap) {
+  if (endpointMap.has(endpointKey)) return endpointMap.get(endpointKey);
+  const next = endpointMap.size;
+  if (next >= PIN_COUNT) {
+    throw new Error(`В CSV больше ${PIN_COUNT} уникальных логических точек. Сократите файл или разбейте его.`);
+  }
+  endpointMap.set(endpointKey, next);
+  return next;
+}
+
+function parseHarnessLogicalRow(row, rowIndex, rowText, endpointMap) {
+  const wireName = String(row[0] || "").trim();
+  const position = String(row[1] || "").trim();
+  const markA = String(row[2] || "").trim();
+  const localPinA = String(row[3] || "").trim();
+  const markB = String(row[4] || "").trim();
+  const localPinB = String(row[5] || "").trim();
+  const note = String(row[6] || "").trim();
+
+  if (!wireName && !position && !markA && !localPinA && !markB && !localPinB && !note) return null;
+  if (!markA || !localPinA || !markB || !localPinB) {
+    throw new Error(`Ошибка в строке ${rowIndex}: должны быть заполнены поля Маркировка/Контакт для обоих концов. Ожидаемый формат: Провод, Позиция, Маркировка, Контакт, Маркировка, Контакт, Примечание. Строка: ${rowText}`);
+  }
+
+  const endpointA = `${markA}::${localPinA}`;
+  const endpointB = `${markB}::${localPinB}`;
+  if (endpointA === endpointB) {
+    throw new Error(`Ошибка в строке ${rowIndex}: логическая точка не может быть соединена сама с собой. Строка: ${rowText}`);
+  }
+
+  const contactA = allocateVirtualContact(endpointA, endpointMap);
+  const contactB = allocateVirtualContact(endpointB, endpointMap);
+  const combinedNote = [position ? `позиция: ${position}` : "", note].filter(Boolean).join("; ");
+  return makeManualPair(contactA, contactB, { wireName, markA, localPinA, markB, localPinB, note: combinedNote });
+}
+
+function parseManualCsv(text) {
+  const delimiter = detectDelimiter(text);
+  const rows = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!rows.length) throw new Error("CSV пустой.");
+
+  const parsed = rows.map((line) => parseDelimitedRow(line, delimiter));
+  const dataRows = [];
+  const endpointMap = new Map();
+  for (let i = 0; i < parsed.length; i += 1) {
+    const row = parsed[i];
+    const rowText = row.join(" | ");
+    const first = String(row[0] || "").trim().toLowerCase();
+    if (!first || csvHeaderLike(first)) continue;
+
+    const pair = parseHarnessLogicalRow(row, i + 1, rowText, endpointMap);
+    if (pair) dataRows.push(pair);
+  }
+  return dataRows;
+}
+
+async function importManualCsv() {
+  if (!serviceUnlockEnabled) return toast(serviceUnlockMessage());
+  const file = $("manualCsvInput")?.files?.[0];
+  if (!file) return toast("Сначала выберите CSV файл.");
+  try {
+    const text = await file.text();
+    const pairs = parseManualCsv(text);
+    if (!pairs.length) throw new Error("В CSV не найдено ни одной связи.");
+    if (manualConnections.length && !confirm("Заменить текущий список связей данными из CSV?")) return;
+    manualConnections = pairs;
+    activeManualPairKey = pairs[0]?.key || "";
+    selectedManualPins = [];
+    renderManualEditor();
+    toast(`Импортировано связей: ${pairs.length}.`);
   } catch (error) {
     toast(error.message);
   }
@@ -720,28 +891,132 @@ function sortReferenceReports(files) {
   return reports;
 }
 
-function renderReferencePreview(item) {
+function renderReferencePreview(item, view = null) {
   const target = $("referencePreview");
   if (!target) return;
-  if (!item) {
+  if (!item && !view) {
     target.innerHTML = '<div class="message">Выберите эталон в журнале, чтобы посмотреть его данные.</div>';
     return;
   }
 
+  const source = item || {};
+  const annotations = Array.isArray(view?.annotations) ? view.annotations : [];
+  const previewList = annotations.slice(0, 24).map((pair, index) => `
+    <div class="manual-pair-item">
+      <div>
+        <strong>Связь ${index + 1}</strong><br>
+        ${escapeHtml(pairDisplayText({
+          a: Number(pair.a),
+          b: Number(pair.b),
+          wireName: pair.wireName || "",
+          markA: pair.markA || "",
+          localPinA: pair.localPinA || "",
+          markB: pair.markB || "",
+          localPinB: pair.localPinB || "",
+          note: pair.note || ""
+        }))}
+      </div>
+    </div>
+  `).join("");
+
   target.innerHTML = `
     <div class="admin-preview-grid">
-      <div class="admin-preview-item"><strong>Название</strong><span>${escapeHtml(item.name || item.file)}</span></div>
-      <div class="admin-preview-item"><strong>Дата</strong><span>${escapeHtml(formatStoredDate(item.createdAtLocal || ""))}</span></div>
-      <div class="admin-preview-item"><strong>Тип сборки</strong><span>${escapeHtml(item.cableType || "не указан")}</span></div>
-      <div class="admin-preview-item"><strong>Ревизия</strong><span>${escapeHtml(item.revision || "не указана")}</span></div>
-      <div class="admin-preview-item"><strong>Прибор</strong><span>${escapeHtml(item.deviceId || "не указан")}</span></div>
-      <div class="admin-preview-item"><strong>Оператор</strong><span>${escapeHtml(item.operator || "не указан")}</span></div>
-      <div class="admin-preview-item"><strong>Статус</strong><span>${escapeHtml(approvalStatusLabel(item.approvalStatus))}</span></div>
-      <div class="admin-preview-item"><strong>Размер</strong><span>${escapeHtml(fileSize(item.size || 0))}</span></div>
-      <div class="admin-preview-item"><strong>CRC таблицы</strong><span>${escapeHtml(item.mappingCrc32 ? String(item.mappingCrc32) : "не указан")}</span></div>
-      <div class="admin-preview-item"><strong>CRC матрицы</strong><span>${escapeHtml(item.matrixCrc32 ? String(item.matrixCrc32) : "не указан")}</span></div>
+      <div class="admin-preview-item"><strong>Название</strong><span>${escapeHtml(source.name || view?.title || source.file || "")}</span></div>
+      <div class="admin-preview-item"><strong>Дата</strong><span>${escapeHtml(formatStoredDate(source.createdAtLocal || ""))}</span></div>
+      <div class="admin-preview-item"><strong>Тип сборки</strong><span>${escapeHtml(source.cableType || "не указан")}</span></div>
+      <div class="admin-preview-item"><strong>Ревизия</strong><span>${escapeHtml(source.revision || "не указана")}</span></div>
+      <div class="admin-preview-item"><strong>Прибор</strong><span>${escapeHtml(source.deviceId || "не указан")}</span></div>
+      <div class="admin-preview-item"><strong>Оператор</strong><span>${escapeHtml(source.operator || "не указан")}</span></div>
+      <div class="admin-preview-item"><strong>Статус</strong><span>${escapeHtml(approvalStatusLabel(source.approvalStatus))}</span></div>
+      <div class="admin-preview-item"><strong>Размер</strong><span>${escapeHtml(fileSize(source.size || 0))}</span></div>
+      <div class="admin-preview-item"><strong>Связей</strong><span>${escapeHtml(String(view?.connectionCount ?? annotations.length ?? 0))}</span></div>
+      <div class="admin-preview-item"><strong>С маркировкой</strong><span>${escapeHtml(String(annotations.filter((pair) => pair.wireName || pair.markA || pair.markB).length))}</span></div>
+    </div>
+    <div class="manual-pair-list-wrap">
+      ${previewList || '<div class="message">Дополнительных сведений по проводам пока нет.</div>'}
     </div>
   `;
+}
+
+async function openReferenceForEditing(fileName) {
+  try {
+    const [item, view] = await Promise.all([
+      Promise.resolve(currentReferences.find((entry) => entry.file === fileName) || null),
+      api(`/api/reference/view?file=${encodeURIComponent(fileName)}`)
+    ]);
+
+    if (item) {
+      fillMetadataForm(item);
+      editingReferenceName = item.name || fileName;
+    } else {
+      editingReferenceName = fileName;
+    }
+    editingReferenceFile = fileName;
+    currentPreviewFile = fileName;
+
+    const annotations = Array.isArray(view?.annotations) && view.annotations.length
+      ? view.annotations
+      : (Array.isArray(view?.connections) ? view.connections : []);
+    manualConnections = annotations
+      .map((pair) => makeManualPair(Number(pair.a), Number(pair.b), {
+        wireName: pair.wireName || "",
+        markA: pair.markA || "",
+        localPinA: pair.localPinA || "",
+        markB: pair.markB || "",
+        localPinB: pair.localPinB || "",
+        note: pair.note || ""
+      }))
+      .filter((pair) => Number.isInteger(pair.a) && Number.isInteger(pair.b) && pair.a >= 0 && pair.b >= 0 && pair.a < PIN_COUNT && pair.b < PIN_COUNT);
+    manualConnections.sort((left, right) => (left.a - right.a) || (left.b - right.b));
+    selectedManualPins = [];
+    activeManualPairKey = manualConnections[0]?.key || "";
+    renderManualEditor();
+    renderReferencePreview(item, view);
+    $("saveManualReferenceButton")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    toast(`Эталон открыт для редактирования: ${editingReferenceName}`);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function saveManualReference() {
+  if (!serviceUnlockEnabled) return toast(serviceUnlockMessage());
+  if (!manualConnections.length) return toast("Добавьте хотя бы одну связь в ручной эталон.");
+  try {
+    persistSelectedManualPairEdits();
+    const metadata = collectReferenceMetadata();
+    const time = browserTimeObject();
+    rememberCurrentMetadata();
+
+    const matrixBytes = buildManualMatrixBytes();
+    const matrixCrc = crc32(matrixBytes);
+    const packedPayload = buildPackedPayload(matrixBytes, matrixCrc);
+    const annotationsPayload = buildAnnotationsPayload();
+    const header = buildReferenceHeader(metadata, time, packedPayload.length, matrixCrc);
+    const fileBytes = new Uint8Array(header.length + packedPayload.length + annotationsPayload.length);
+    fileBytes.set(header, 0);
+    fileBytes.set(packedPayload, header.length);
+    fileBytes.set(annotationsPayload, header.length + packedPayload.length);
+
+    let fileName = `${sanitizeReferenceFileBase(metadata.name)}.ref`;
+    if (editingReferenceFile) {
+      const overwrite = confirm(
+        `Перезаписать открытый эталон ${editingReferenceName || editingReferenceFile}?\n\nНажмите OK для перезаписи.\nНажмите Отмена, чтобы сохранить как новый файл.`
+      );
+      if (overwrite) fileName = editingReferenceFile;
+    }
+
+    const response = await uploadGeneratedReference(fileName, fileBytes);
+    editingReferenceFile = response.file || fileName;
+    editingReferenceName = metadata.name;
+    currentPreviewFile = editingReferenceFile;
+    renderManualEditor();
+    toast(`Ручной эталон сохранён: ${response.file || fileName}`);
+    await loadReferences();
+    await openReferenceForEditing(editingReferenceFile);
+  } catch (error) {
+    toast(error.message);
+  }
 }
 
 function setAdminAccess(enabled) {
@@ -751,7 +1026,7 @@ function setAdminAccess(enabled) {
   const text = $("serviceText");
 
   if (badge) {
-    badge.textContent = serviceUnlockEnabled ? "Сервисный режим включен" : "Сервисный режим выключен";
+    badge.textContent = serviceUnlockEnabled ? "Сервисный режим включён" : "Сервисный режим выключен";
     badge.className = `badge ${serviceUnlockEnabled ? "ok" : "error"}`;
   }
   if (text) {
@@ -761,13 +1036,12 @@ function setAdminAccess(enabled) {
   }
   if (note) note.hidden = serviceUnlockEnabled;
 
-  ["captureButton", "saveManualReferenceButton", "referenceUploadButton", "calculationUploadButton"].forEach((id) => {
+  ["captureButton", "saveManualReferenceButton", "referenceUploadButton", "calculationUploadButton", "manualCsvImportButton"].forEach((id) => {
     if ($(id)) $(id).hidden = !serviceUnlockEnabled;
   });
-  ["referenceUploadInput", "calculationUploadInput"].forEach((id) => {
+  ["referenceUploadInput", "calculationUploadInput", "manualCsvInput"].forEach((id) => {
     if ($(id)) $(id).hidden = !serviceUnlockEnabled;
   });
-
   renderReferences(currentReferences);
 }
 
@@ -775,29 +1049,28 @@ async function loadDevice() {
   try {
     const device = await api("/api/device");
     latestDevice = device;
-    const badge = $("deviceBadge");
-    badge.textContent = `${device.deviceModel || device.hardware} · ${device.ip} · ${device.link ? "LINK" : "NO LINK"} · FW ${device.firmwareVersion || "?"}`;
-    badge.className = `badge ${device.link ? "ok" : "error"}`;
-
-    const engineBadge = $("engineBadge");
-    const engineText = $("engineText");
-    if (engineBadge) {
+    if ($("deviceBadge")) {
+      $("deviceBadge").textContent = `${device.deviceModel || device.hardware} · ${device.ip} · ${device.link ? "LINK" : "NO LINK"} · FW ${device.firmwareVersion || "?"}`;
+      $("deviceBadge").className = `badge ${device.link ? "ok" : "error"}`;
+    }
+    if ($("engineBadge")) {
       const kind = device.engineBusy ? "busy" : device.engineState === "failed" ? "error" : device.engineState === "idle" ? "ok" : "neutral";
-      engineBadge.className = `badge ${kind}`;
-      engineBadge.textContent = device.engineBusy ? "Идет операция" : (device.engineState || "idle");
+      $("engineBadge").className = `badge ${kind}`;
+      $("engineBadge").textContent = device.engineBusy ? "Идёт операция" : (device.engineState || "idle");
     }
-    if (engineText) {
-      engineText.textContent = device.engineMessage || "Система готова.";
-    }
-
+    if ($("engineText")) $("engineText").textContent = device.engineMessage || "Система готова.";
     setAdminAccess(device.serviceUnlockEnabled);
   } catch (error) {
     latestDevice = null;
-    $("deviceBadge").textContent = "Нет связи";
-    $("deviceBadge").className = "badge error";
-    $("engineBadge").textContent = "Нет связи";
-    $("engineBadge").className = "badge error";
-    $("engineText").textContent = "Не удалось получить состояние устройства.";
+    if ($("deviceBadge")) {
+      $("deviceBadge").textContent = "Нет связи";
+      $("deviceBadge").className = "badge error";
+    }
+    if ($("engineBadge")) {
+      $("engineBadge").textContent = "Нет связи";
+      $("engineBadge").className = "badge error";
+    }
+    if ($("engineText")) $("engineText").textContent = "Не удалось получить состояние устройства.";
     setAdminAccess(false);
   }
 }
@@ -807,7 +1080,17 @@ async function deleteReferenceFile(fileName) {
   if (!confirm(`Удалить эталон ${fileName}?`)) return;
   try {
     await api(`/api/reference?file=${encodeURIComponent(fileName)}`, { method: "DELETE" });
-    toast("Эталон удален.");
+    if (editingReferenceFile === fileName) {
+      editingReferenceFile = "";
+      editingReferenceName = "";
+      currentPreviewFile = "";
+      manualConnections = [];
+      activeManualPairKey = "";
+      selectedManualPins = [];
+      renderManualEditor();
+      renderReferencePreview(null, null);
+    }
+    toast("Эталон удалён.");
     await loadReferences();
   } catch (error) {
     toast(error.message);
@@ -835,9 +1118,8 @@ function renderReferences(files) {
   referencePage = Math.min(Math.max(referencePage, 1), totalPages);
   const start = (referencePage - 1) * REFERENCE_PAGE_SIZE;
   const pageReports = reports.slice(start, start + REFERENCE_PAGE_SIZE);
-
   const rows = pageReports.map((item) => `
-    <tr>
+    <tr ${item.file === currentPreviewFile ? 'class="is-selected"' : ""}>
       <td>${escapeHtml(formatStoredDate(item.createdAtLocal || ""))}</td>
       <td class="wrap">${escapeHtml(item.name || item.file)}</td>
       <td class="wrap">${escapeHtml(item.cableType || "не указан")}</td>
@@ -845,7 +1127,13 @@ function renderReferences(files) {
       <td>${escapeHtml(item.deviceId || "не указан")}</td>
       <td class="wrap">${escapeHtml(item.operator || "не указан")}</td>
       <td>${escapeHtml(approvalStatusLabel(item.approvalStatus))}</td>
-      <td><div class="journal-actions"><button type="button" data-open-reference="${escapeHtml(item.file)}">Открыть</button><button type="button" data-delete-reference="${escapeHtml(item.file)}" ${serviceUnlockEnabled ? "" : "hidden"}>Удалить</button><a href="/api/download?type=reference&file=${encodeURIComponent(item.file)}">Выгрузить</a></div></td>
+      <td>
+        <div class="journal-actions">
+          <button type="button" data-open-reference="${escapeHtml(item.file)}">Открыть</button>
+          <button type="button" data-delete-reference="${escapeHtml(item.file)}" ${serviceUnlockEnabled ? "" : "hidden"}>Удалить</button>
+          <a href="/api/download?type=reference&file=${encodeURIComponent(item.file)}">Выгрузить</a>
+        </div>
+      </td>
     </tr>
   `).join("");
 
@@ -855,7 +1143,7 @@ function renderReferences(files) {
   pagination.innerHTML = `
     <button type="button" data-reference-page="prev" ${referencePage <= 1 ? "disabled" : ""}>Назад</button>
     <span class="journal-pagination-info">Страница ${referencePage} из ${totalPages}</span>
-    <button type="button" data-reference-page="next" ${referencePage >= totalPages ? "disabled" : ""}>Вперед</button>
+    <button type="button" data-reference-page="next" ${referencePage >= totalPages ? "disabled" : ""}>Вперёд</button>
   `;
 
   target.querySelectorAll("[data-open-reference]").forEach((button) => {
@@ -882,6 +1170,10 @@ async function loadReferences() {
     primeSuggestionsFromReferences(currentReferences);
     refreshInputSuggestions();
     renderReferences(currentReferences);
+    if (currentPreviewFile) {
+      const item = currentReferences.find((entry) => entry.file === currentPreviewFile) || null;
+      renderReferencePreview(item, null);
+    }
   } catch (error) {
     toast(error.message);
   }
@@ -890,134 +1182,92 @@ async function loadReferences() {
 function uploadFile(kind, input, bar, text) {
   if (!serviceUnlockEnabled) return toast(serviceUnlockMessage());
   const file = input.files?.[0];
-  if (!file) {
-    toast("Сначала выберите файл.");
-    return;
-  }
+  if (!file) return toast("Сначала выберите файл.");
 
   const form = new FormData();
   form.append("file", file, file.name);
+  if (text) text.textContent = `Загрузка: ${file.name}`;
+  if (bar) bar.style.width = "20%";
 
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", `/api/upload/${kind}`, true);
-
-  input.disabled = true;
-  bar.style.width = "0%";
-  text.textContent = `Загрузка: ${file.name}`;
-
-  xhr.upload.onprogress = (event) => {
-    if (!event.lengthComputable) return;
-    const percent = Math.max(0, Math.min(100, Math.round((event.loaded / event.total) * 100)));
-    bar.style.width = `${percent}%`;
-    text.textContent = `Загрузка: ${file.name} (${percent}%)`;
-  };
-
-  xhr.onload = async () => {
-    input.disabled = false;
-    const response = xhr.responseText ? JSON.parse(xhr.responseText) : {};
-    if (xhr.status >= 200 && xhr.status < 300) {
-      bar.style.width = "100%";
-      text.textContent = `Загружено: ${response.file || file.name}`;
-      input.value = "";
-      toast("Файл проверен и сохранен.");
-      await loadReferences();
-    } else {
-      bar.style.width = "0%";
-      text.textContent = response.error || `Ошибка HTTP ${xhr.status}`;
-      toast(text.textContent);
-    }
-  };
-
-  xhr.onerror = () => {
-    input.disabled = false;
-    bar.style.width = "0%";
-    text.textContent = "Ошибка сети при загрузке";
-    toast(text.textContent);
-  };
-
-  xhr.send(form);
+  fetch(kind === "reference" ? "/api/upload/reference" : "/api/upload/calculation", {
+    method: "POST",
+    body: form,
+    cache: "no-store"
+  })
+    .then(async (response) => {
+      const payload = await response.text();
+      let data;
+      try {
+        data = JSON.parse(payload);
+      } catch {
+        data = payload;
+      }
+      if (!response.ok) throw new Error(data?.error || payload || `HTTP ${response.status}`);
+      if (bar) bar.style.width = "100%";
+      if (text) text.textContent = `Загружено: ${data.file || file.name}`;
+      toast(kind === "reference" ? "Эталон загружен." : "Отчёт загружен.");
+      if (kind === "reference") loadReferences();
+    })
+    .catch((error) => {
+      if (bar) bar.style.width = "0%";
+      if (text) text.textContent = error.message;
+      toast(error.message);
+    });
 }
 
-$("captureButton").addEventListener("click", async () => {
+async function startReferenceCapture() {
   if (!serviceUnlockEnabled) return toast(serviceUnlockMessage());
   try {
-    const params = referenceMetadataParams();
-    localStorage.setItem("cableTesterDeviceId", $("deviceId").value.trim());
-    localStorage.setItem("cableTesterOperator", $("operatorName").value.trim());
     rememberCurrentMetadata();
-    await api(`/api/reference/capture?${params}`, { method: "POST" });
-    toast("Эталонный замер запущен. После завершения он появится в журнале.");
-    setTimeout(loadReferences, 2500);
-    setTimeout(loadDevice, 1200);
+    await api(`/api/reference/capture?${referenceMetadataParams().toString()}`, { method: "POST" });
+    toast("Эталонный замер запущен.");
   } catch (error) {
     toast(error.message);
   }
-});
+}
 
-$("saveManualReferenceButton").addEventListener("click", saveManualReference);
-
-$("addManualPairButton").addEventListener("click", () => {
-  try {
-    const a = parseContactValue($("manualContactA").value);
-    const b = parseContactValue($("manualContactB").value);
-    addManualPair(a, b);
-  } catch (error) {
-    toast(error.message);
-  }
-});
-
-$("clearManualPairsButton").addEventListener("click", () => {
+function resetManualEditor() {
   manualConnections = [];
   selectedManualPins = [];
   activeManualPairKey = "";
-  if ($("manualContactA")) $("manualContactA").value = "";
-  if ($("manualContactB")) $("manualContactB").value = "";
+  editingReferenceFile = "";
+  editingReferenceName = "";
+  fillManualPairInputs(null);
   renderManualEditor();
-});
-
-if ($("manualMatrixCanvas")) {
-  $("manualMatrixCanvas").addEventListener("click", handleManualCanvasClick);
-  $("manualMatrixCanvas").addEventListener("mousemove", handleManualCanvasMove);
-  $("manualMatrixCanvas").addEventListener("mouseleave", handleManualCanvasLeave);
 }
 
-$("referenceUploadButton").addEventListener("click", () => uploadFile(
-  "reference", $("referenceUploadInput"), $("referenceUploadBar"), $("referenceUploadText")
-));
-
-$("calculationUploadButton").addEventListener("click", () => uploadFile(
-  "calculation", $("calculationUploadInput"), $("calculationUploadBar"), $("calculationUploadText")
-));
-
-$("referenceUploadInput").addEventListener("change", (event) => {
-  $("referenceUploadText").textContent = event.target.files?.[0]?.name || "Файл не выбран";
+$("captureButton")?.addEventListener("click", startReferenceCapture);
+$("saveManualReferenceButton")?.addEventListener("click", saveManualReference);
+$("addManualPairButton")?.addEventListener("click", addManualPairFromInputs);
+$("clearManualPairsButton")?.addEventListener("click", () => {
+  if (!manualConnections.length) return;
+  if (!confirm("Очистить все ручные связи?")) return;
+  resetManualEditor();
 });
-
-$("calculationUploadInput").addEventListener("change", (event) => {
-  $("calculationUploadText").textContent = event.target.files?.[0]?.name || "Файл не выбран";
-});
-
-$("refreshAdminButton").addEventListener("click", async () => {
+$("manualCsvImportButton")?.addEventListener("click", importManualCsv);
+$("manualWireName")?.addEventListener("input", persistSelectedManualPairEdits);
+$("manualMarkA")?.addEventListener("input", persistSelectedManualPairEdits);
+$("manualMarkB")?.addEventListener("input", persistSelectedManualPairEdits);
+$("manualNote")?.addEventListener("input", persistSelectedManualPairEdits);
+$("referenceUploadButton")?.addEventListener("click", () => uploadFile("reference", $("referenceUploadInput"), $("referenceUploadBar"), $("referenceUploadText")));
+$("calculationUploadButton")?.addEventListener("click", () => uploadFile("calculation", $("calculationUploadInput"), $("calculationUploadBar"), $("calculationUploadText")));
+$("refreshReferencesButton")?.addEventListener("click", loadReferences);
+$("refreshAdminButton")?.addEventListener("click", async () => {
   await loadDevice();
   await loadReferences();
 });
-
-$("refreshReferencesButton").addEventListener("click", loadReferences);
-$("referenceSort").addEventListener("change", () => {
+$("referenceSort")?.addEventListener("change", () => {
   referencePage = 1;
   renderReferences(currentReferences);
 });
+["deviceId", "operatorName"].forEach((id) => {
+  $(id)?.addEventListener("change", rememberCurrentMetadata);
+  $(id)?.addEventListener("blur", rememberCurrentMetadata);
+});
 
-for (const id of ["deviceId", "operatorName"]) {
-  if ($(id)) $(id).addEventListener("change", rememberCurrentMetadata);
-}
-
-$("deviceId").value = localStorage.getItem("cableTesterDeviceId") || "";
-$("operatorName").value = localStorage.getItem("cableTesterOperator") || "";
 refreshInputSuggestions();
 updateManualHoverInfo(null);
 renderManualEditor();
-
 loadDevice();
 loadReferences();
 setInterval(loadDevice, 10000);
