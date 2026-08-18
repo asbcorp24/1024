@@ -7,6 +7,7 @@ def check_assets(source, target, env):
     project_dir = Path(env.subst("$PROJECT_DIR"))
     required = [
         project_dir / "data" / "index.html",
+        project_dir / "data" / "help.html",
         project_dir / "data" / "app.js",
         project_dir / "data" / "style.css",
     ]
