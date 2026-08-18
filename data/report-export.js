@@ -15,6 +15,12 @@
     return Number.isInteger(a) && Number.isInteger(b) && a >= 0 && b >= 0 && a <= 1023 && b <= 1023 && a !== b;
   }
 
+  function pairSet(items) {
+    return new Set((Array.isArray(items) ? items : [])
+      .filter(validPair)
+      .map((item) => pairKey(item?.a ?? item?.source, item?.b ?? item?.target)));
+  }
+
   function endpointMapFromAnnotations(annotations) {
     const map = new Map();
 
@@ -114,18 +120,24 @@
       const annotationMap = buildAnnotationMap(annotations);
       const endpointMap = endpointMapFromAnnotations(annotations);
 
-      const missingPairs = Array.isArray(resultView?.missingConnections) ? resultView.missingConnections : [];
-      const extraPairs = Array.isArray(resultView?.extraConnections) ? resultView.extraConnections : [];
-      const asymmetricPairs = Array.isArray(resultView?.asymmetricConnections) ? resultView.asymmetricConnections : [];
+      // connections в resultView строится непосредственно из сохранённой измеренной матрицы:
+      // пара попадает сюда только если A->B и B->A реально обнаружены.
+      const measuredPairs = Array.isArray(resultView?.connections) ? resultView.connections : [];
+      const measuredKeys = pairSet(measuredPairs);
 
-      const missingKeys = new Set(missingPairs.filter(validPair).map((item) => pairKey(item.a, item.b)));
-      const asymmetricKeys = new Set(asymmetricPairs.filter(validPair).map((item) => pairKey(item.a, item.b)));
+      // Асимметрию берём из представления матрицы и дублируем первичным списком из JSON отчёта.
+      const asymmetricPairs = [
+        ...(Array.isArray(resultView?.asymmetricConnections) ? resultView.asymmetricConnections : []),
+        ...(Array.isArray(result?.asymmetric) ? result.asymmetric : [])
+      ];
+      const asymmetricKeys = pairSet(asymmetricPairs);
 
-      // Отчёт должен быть непустым даже при полном обрыве жгута.
-      // Поэтому основой CSV является весь эталон, а не только реально найденные связи.
+      // Основой CSV является весь эталон. Норма определяется не по списку missing,
+      // а только по факту наличия двусторонней пары в измеренной матрице.
       const referencePairsSource = Array.isArray(referenceView?.connections) && referenceView.connections.length
         ? referenceView.connections
         : annotations;
+      const expectedKeys = pairSet(referencePairsSource);
 
       const rows = [[
         "Провод",
@@ -138,6 +150,9 @@
       ]];
 
       const emitted = new Set();
+      let computedMissing = 0;
+      let computedExtra = 0;
+      let computedAsymmetric = 0;
 
       for (const rawPair of referencePairsSource) {
         if (!validPair(rawPair)) continue;
@@ -149,38 +164,49 @@
         emitted.add(key);
 
         const statuses = [];
-        if (missingKeys.has(key)) statuses.push("Обрыв");
-        if (asymmetricKeys.has(key)) statuses.push("Асимметрия");
+        if (!measuredKeys.has(key)) {
+          statuses.push("Обрыв");
+          computedMissing += 1;
+        }
+        if (asymmetricKeys.has(key)) {
+          statuses.push("Асимметрия");
+          computedAsymmetric += 1;
+        }
         if (!statuses.length) statuses.push("Норма");
 
         appendReportRow(rows, pair, endpointMap, statuses.join("; "));
       }
 
-      // Паразитные связи отсутствуют в эталоне, поэтому добавляем их отдельными строками.
-      for (const rawPair of extraPairs) {
+      // Любая измеренная двусторонняя связь, которой нет в эталоне, является паразитной.
+      for (const rawPair of measuredPairs) {
         if (!validPair(rawPair)) continue;
-        const pair = mergePairMetadata(rawPair, annotationMap);
-        const a = Number(pair?.a ?? pair?.source);
-        const b = Number(pair?.b ?? pair?.target);
+        const a = Number(rawPair?.a ?? rawPair?.source);
+        const b = Number(rawPair?.b ?? rawPair?.target);
         const key = pairKey(a, b);
-        if (emitted.has(key)) continue;
-        emitted.add(key);
+        if (expectedKeys.has(key) || emitted.has(key)) continue;
 
+        emitted.add(key);
+        computedExtra += 1;
+        const pair = mergePairMetadata(rawPair, annotationMap);
         const statuses = ["Паразитная связь"];
-        if (asymmetricKeys.has(key)) statuses.push("Асимметрия");
+        if (asymmetricKeys.has(key)) {
+          statuses.push("Асимметрия");
+          computedAsymmetric += 1;
+        }
         appendReportRow(rows, pair, endpointMap, statuses.join("; "));
       }
 
-      // Асимметрия может быть на паре, которой нет среди обычных двусторонних связей.
+      // Односторонняя связь не входит в measuredPairs, поэтому добавляем неизвестные
+      // асимметричные пары отдельно, если они ещё не были строкой эталона.
       for (const rawPair of asymmetricPairs) {
         if (!validPair(rawPair)) continue;
-        const pair = mergePairMetadata(rawPair, annotationMap);
-        const a = Number(pair?.a ?? pair?.source);
-        const b = Number(pair?.b ?? pair?.target);
+        const a = Number(rawPair?.a ?? rawPair?.source);
+        const b = Number(rawPair?.b ?? rawPair?.target);
         const key = pairKey(a, b);
         if (emitted.has(key)) continue;
         emitted.add(key);
-        appendReportRow(rows, pair, endpointMap, "Асимметрия");
+        computedAsymmetric += 1;
+        appendReportRow(rows, mergePairMetadata(rawPair, annotationMap), endpointMap, "Асимметрия");
       }
 
       const exportName = String(fileName || "report.json").replace(/\.json$/i, ".csv");
@@ -191,10 +217,20 @@
       );
 
       const count = Math.max(0, rows.length - 1);
+      const savedSummary = result?.summary || {};
+      const savedMissing = Number(savedSummary.missingLinks || 0);
+      const savedExtra = Number(savedSummary.extraLinks || 0);
+      const savedAsymmetric = Number(savedSummary.asymmetricLinks || 0);
+      const mismatch = savedMissing !== computedMissing ||
+        savedExtra !== computedExtra ||
+        savedAsymmetric !== computedAsymmetric;
+
       if (!count) {
         toast("CSV создан, но в выбранном эталоне и результате нет ни одной связи.");
+      } else if (mismatch) {
+        toast(`CSV выгружен: ${count} строк. Внимание: матрица даёт обрывов ${computedMissing}, паразитных ${computedExtra}, асимметрий ${computedAsymmetric}; сводка отчёта: ${savedMissing}/${savedExtra}/${savedAsymmetric}.`);
       } else {
-        toast(`CSV отчёта выгружен: ${count} строк в формате импорта эталона.`);
+        toast(`CSV отчёта выгружен: ${count} строк; обрывов ${computedMissing}, паразитных ${computedExtra}, асимметрий ${computedAsymmetric}.`);
       }
     } catch (error) {
       toast(error.message);
