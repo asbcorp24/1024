@@ -8,7 +8,10 @@ def check_assets(source, target, env):
     required = [
         project_dir / "data" / "index.html",
         project_dir / "data" / "help.html",
+        project_dir / "data" / "admin.html",
         project_dir / "data" / "app.js",
+        project_dir / "data" / "admin.js",
+        project_dir / "data" / "report-export.js",
         project_dir / "data" / "style.css",
     ]
     missing = [str(path.relative_to(project_dir)) for path in required if not path.exists()]
